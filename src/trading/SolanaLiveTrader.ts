@@ -183,20 +183,31 @@ export async function fetchJupiterQuote(
   amountLamportsOrUnits: number,
   slippageBps: number = 100
 ): Promise<any> {
-  const url = `https://quote-api.jup.ag/v6/quote?inputMint=${inputMint}&outputMint=${outputMint}&amount=${Math.floor(amountLamportsOrUnits)}&slippageBps=${slippageBps}&swapMode=ExactIn`;
-  
-  const res = await fetch(url, { signal: AbortSignal.timeout(6000) });
-  if (!res.ok) {
-    const errText = await res.text();
-    throw new Error(`Jupiter Quote API returned ${res.status}: ${errText}`);
-  }
+  const qs = `inputMint=${inputMint}&outputMint=${outputMint}&amount=${Math.floor(amountLamportsOrUnits)}&slippageBps=${slippageBps}&swapMode=ExactIn`;
+  const endpoints = [
+    `https://lite-api.jup.ag/swap/v1/quote?${qs}`,
+    `https://api.jup.ag/swap/v1/quote?${qs}`,
+  ];
 
-  const quote = await res.json();
-  if (!quote || !quote.outAmount) {
-    throw new Error('No executable route found for this swap pair.');
+  let lastErr = 'Jupiter Quote API unreachable';
+  for (const url of endpoints) {
+    try {
+      const res = await fetch(url, { signal: AbortSignal.timeout(6000) });
+      if (!res.ok) {
+        lastErr = `Jupiter Quote API returned ${res.status}: ${await res.text()}`;
+        continue;
+      }
+      const quote = await res.json();
+      if (!quote || !quote.outAmount) {
+        lastErr = 'No executable route found for this swap pair.';
+        continue;
+      }
+      return quote;
+    } catch (e: any) {
+      lastErr = e.message;
+    }
   }
-
-  return quote;
+  throw new Error(lastErr);
 }
 
 /**
@@ -208,7 +219,7 @@ export async function buildJupiterSwapTransaction(
   priorityFeeLevel: 'standard' | 'high' | 'ultra' = 'standard'
 ): Promise<string> {
   const feeMap = {
-    standard: 50000,   // microLamports compute unit price
+    standard: 50000,
     high: 250000,
     ultra: 1000000,
   };
@@ -221,24 +232,35 @@ export async function buildJupiterSwapTransaction(
     prioritizationFeeLamports: feeMap[priorityFeeLevel] || 'auto',
   };
 
-  const res = await fetch('https://quote-api.jup.ag/v6/swap', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(body),
-    signal: AbortSignal.timeout(8000),
-  });
+  const endpoints = [
+    'https://lite-api.jup.ag/swap/v1/swap',
+    'https://api.jup.ag/swap/v1/swap',
+  ];
 
-  if (!res.ok) {
-    const errText = await res.text();
-    throw new Error(`Jupiter Swap Build API returned ${res.status}: ${errText}`);
+  let lastErr = 'Jupiter Swap API unreachable';
+  for (const url of endpoints) {
+    try {
+      const res = await fetch(url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+        signal: AbortSignal.timeout(8000),
+      });
+      if (!res.ok) {
+        lastErr = `Jupiter Swap Build API returned ${res.status}: ${await res.text()}`;
+        continue;
+      }
+      const data = await res.json();
+      if (!data || !data.swapTransaction) {
+        lastErr = 'Jupiter Swap API did not return a valid serialized transaction';
+        continue;
+      }
+      return data.swapTransaction;
+    } catch (e: any) {
+      lastErr = e.message;
+    }
   }
-
-  const data = await res.json();
-  if (!data || !data.swapTransaction) {
-    throw new Error('Jupiter Swap API did not return a valid serialized transaction');
-  }
-
-  return data.swapTransaction;
+  throw new Error(lastErr);
 }
 
 /**
@@ -570,4 +592,144 @@ export async function executeLiveSolanaSell(params: LiveSellParams): Promise<Liv
       executionDurationMs: Date.now() - start,
     };
   }
+}
+
+/**
+ * Prepare unsigned Jupiter BUY transaction for browser wallet (Phantom / Solflare) signing
+ */
+export async function prepareLiveBuyTransaction(params: LiveBuyParams & { userPublicKey: string }): Promise<{
+  success: boolean;
+  base64Tx?: string;
+  estTokensOut?: number;
+  error?: string;
+}> {
+  try {
+    const conn = getSolanaConnection();
+    const pubkey = new PublicKey(params.userPublicKey);
+    const balanceLamports = await conn.getBalance(pubkey);
+    const availableSol = balanceLamports / 1e9;
+    if (availableSol < params.tradeAmountSol + 0.005) {
+      return {
+        success: false,
+        error: `Insufficient SOL balance (${availableSol.toFixed(4)} SOL). Needed ${(params.tradeAmountSol + 0.005).toFixed(4)} SOL.`,
+      };
+    }
+
+    const amountLamports = Math.floor(params.tradeAmountSol * 1e9);
+    const quote = await fetchJupiterQuote(
+      WSOL_MINT,
+      params.tokenAddress,
+      amountLamports,
+      params.maxSlippageBps || 150
+    );
+    const estTokensOut = parseFloat(quote.outAmount) / Math.pow(10, quote.outAmountDecimals || 6);
+    const base64Tx = await buildJupiterSwapTransaction(
+      quote,
+      params.userPublicKey,
+      params.priorityFeeLevel || 'standard'
+    );
+    return { success: true, base64Tx, estTokensOut };
+  } catch (err: any) {
+    return { success: false, error: err.message || 'Failed to prepare Jupiter buy tx' };
+  }
+}
+
+/**
+ * Prepare unsigned Jupiter SELL transaction for browser wallet (Phantom / Solflare) signing
+ */
+export async function prepareLiveSellTransaction(params: LiveSellParams & { userPublicKey: string }): Promise<{
+  success: boolean;
+  base64Tx?: string;
+  estSolReceived?: number;
+  error?: string;
+}> {
+  try {
+    const decimals = params.tokenDecimals || 6;
+    const rawAmount = Math.floor(params.tokenQuantity * Math.pow(10, decimals));
+    if (rawAmount <= 0) {
+      return { success: false, error: 'Invalid token quantity for selling' };
+    }
+    const quote = await fetchJupiterQuote(
+      params.tokenAddress,
+      WSOL_MINT,
+      rawAmount,
+      params.maxSlippageBps || 200
+    );
+    const estSolReceived = parseFloat(quote.outAmount) / 1e9;
+    const base64Tx = await buildJupiterSwapTransaction(
+      quote,
+      params.userPublicKey,
+      params.priorityFeeLevel || 'high'
+    );
+    return { success: true, base64Tx, estSolReceived };
+  } catch (err: any) {
+    return { success: false, error: err.message || 'Failed to prepare Jupiter sell tx' };
+  }
+}
+
+/**
+ * Confirm & verify a transaction signed and broadcast by the browser Phantom wallet
+ */
+export async function finalizeBrowserSignedTransaction(params: {
+  signature: string;
+  targetMint: string;
+  userPubkey: string;
+  isBuy: boolean;
+  tradeAmountUsd?: number;
+  tradeAmountSol?: number;
+  estTokensOut?: number;
+  estSolReceived?: number;
+  tokenQuantity?: number;
+  solPriceUsd?: number;
+}): Promise<LiveTradeResult> {
+  const start = Date.now();
+  const conn = getSolanaConnection();
+  const verifyResult = await confirmAndVerifySolanaTransaction(
+    params.signature,
+    conn,
+    params.targetMint,
+    params.userPubkey
+  );
+  if (!verifyResult.confirmed) {
+    return {
+      success: false,
+      signature: params.signature,
+      explorerUrl: `https://solscan.io/tx/${params.signature}`,
+      error: verifyResult.error || 'Transaction confirmation failed.',
+      timestamp: Date.now(),
+      executionDurationMs: Date.now() - start,
+    };
+  }
+  const solUsd = params.solPriceUsd || 145;
+  if (params.isBuy) {
+    const actualTokens = verifyResult.actualTokensReceived || params.estTokensOut || 1;
+    const actualSol = verifyResult.actualSolSpent || params.tradeAmountSol || 0;
+    const usd = params.tradeAmountUsd || actualSol * solUsd;
+    return {
+      success: true,
+      signature: params.signature,
+      explorerUrl: `https://solscan.io/tx/${params.signature}`,
+      actualAmountIn: actualSol,
+      actualAmountOut: actualTokens,
+      actualEffectivePriceUsd: actualTokens > 0 ? usd / actualTokens : 0,
+      gasCostUsd: ((verifyResult.feeLamports || 5000) / 1e9) * solUsd,
+      totalFeesUsd: ((verifyResult.feeLamports || 5000) / 1e9) * solUsd,
+      timestamp: Date.now(),
+      executionDurationMs: Date.now() - start,
+    };
+  }
+  const actualSol = verifyResult.actualSolReceived || params.estSolReceived || 0;
+  const qty = params.tokenQuantity || 1;
+  return {
+    success: true,
+    signature: params.signature,
+    explorerUrl: `https://solscan.io/tx/${params.signature}`,
+    actualAmountIn: qty,
+    actualAmountOut: actualSol,
+    actualEffectivePriceUsd: qty > 0 ? (actualSol * solUsd) / qty : 0,
+    gasCostUsd: ((verifyResult.feeLamports || 5000) / 1e9) * solUsd,
+    totalFeesUsd: ((verifyResult.feeLamports || 5000) / 1e9) * solUsd,
+    timestamp: Date.now(),
+    executionDurationMs: Date.now() - start,
+  };
 }

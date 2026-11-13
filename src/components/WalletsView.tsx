@@ -304,17 +304,17 @@ export const WalletsView: React.FC = () => {
         <div className="flex flex-wrap items-center justify-between gap-2 border-b border-[var(--border)] pb-2">
           <div className="flex items-center gap-2 font-semibold text-[var(--text)]">
             <KeyRound size={15} className="text-[var(--teal)]" />
-            <span>Autonomous Live Swap Signer (Solana Mainnet)</span>
+            <span>Autonomous Live Swap Signer (Optional — Unattended Mode)</span>
           </div>
           <span className={`font-mono font-semibold ${signerStatus?.configured ? 'text-[var(--green)]' : 'text-[var(--muted)]'}`}>
             {signerStatus?.configured
               ? `Configured (${signerStatus.address?.slice(0, 6)}...${signerStatus.address?.slice(-4)})`
-              : 'Not configured (browser Phantom active)'}
+              : 'Optional (Phantom browser popup active)'}
           </span>
         </div>
 
         <p className="text-[var(--muted)] leading-relaxed">
-          Browser wallets like Phantom require manual popup approval per transaction. To let the sniper automatically buy and sell at sub-second speeds in <strong>Live Mode</strong>, provide a dedicated Solana trading keypair (held strictly in server memory, or set via <code className="text-[var(--text)]">SOLANA_PRIVATE_KEY</code> in env).
+          By default, Live mode works directly with your connected <strong>Phantom / Solflare</strong> browser extension and prompts you to approve each swap in Phantom. Only paste a dedicated trading keypair below (or set <code className="text-[var(--text)]">SOLANA_PRIVATE_KEY</code>) if you want unattended auto-signing without Phantom popups.
         </p>
 
         {signerMessage && (

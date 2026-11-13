@@ -63,7 +63,7 @@ export const LiveConfirmModal: React.FC = () => {
             <ul className="list-disc list-inside space-y-1 pl-1">
               <li>Bot will be <strong>STOPPED</strong> immediately until you review Live settings and press Start bot.</li>
               <li>Paper account ledger is isolated from your real Solana wallet.</li>
-              <li>A connected Phantom/Solflare wallet with gas above {config.MIN_GAS_RESERVE_SOL || 0.01} SOL and an autonomous signing keypair are required before starting.</li>
+              <li>A connected Phantom/Solflare wallet with gas above {config.MIN_GAS_RESERVE_SOL || 0.01} SOL is required before starting Live mode (Phantom asks to confirm swaps in your browser, or you can optionally set an autonomous keypair in Wallets).</li>
               <li>
                 Sniper risk limits active: trade size ${config.trade_size_usd || 5} (capped at ${config.MAX_POSITION_SIZE_USD || 100}), daily loss limit ${config.daily_loss_limit_usd || 10}, TP +{config.take_profit_pct || 50}%, trailing stop {config.trailing_stop_pct ? `${config.trailing_stop_pct}%` : 'off'}.
               </li>

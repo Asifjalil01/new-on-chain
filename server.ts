@@ -11,6 +11,9 @@ import {
   clearTradingKeypair,
   executeLiveSolanaBuy,
   executeLiveSolanaSell,
+  prepareLiveBuyTransaction,
+  prepareLiveSellTransaction,
+  finalizeBrowserSignedTransaction,
 } from './src/trading/SolanaLiveTrader';
 
 // Initialize Trading Keypair from Environment if present (NEVER log the secret)
@@ -814,6 +817,32 @@ export let botStatus = {
 const inFlightBuys = new Set<string>();
 const inFlightSells = new Set<string>();
 
+const pendingBrowserTxs = new Map<
+  string,
+  {
+    resolve: (res: { signature?: string; error?: string }) => void;
+    timer: NodeJS.Timeout;
+  }
+>();
+
+function requestBrowserWalletSignature(payload: {
+  action: 'BUY' | 'SELL';
+  symbol: string;
+  mint: string;
+  base64Tx: string;
+  userPublicKey: string;
+}): Promise<{ signature?: string; error?: string }> {
+  return new Promise((resolve) => {
+    const id = `tx_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
+    const timer = setTimeout(() => {
+      pendingBrowserTxs.delete(id);
+      resolve({ error: 'Phantom wallet confirmation timed out (65s).' });
+    }, 65_000);
+    pendingBrowserTxs.set(id, { resolve, timer });
+    broadcastSse('pending_browser_sign', { id, ...payload });
+  });
+}
+
 // ---------------- CANDIDATE SOURCES (bot.py exact logic) ----------------
 const _srcLast: Record<string, number> = {};
 export const _srcStats: Record<string, { items: number; ok_at: number }> = {};
@@ -1091,18 +1120,20 @@ function canOpenPosition(mode: ExecutionMode): { allowed: boolean; reason: strin
 
   if (mode === 'live') {
     const liveWallet = getLiveConnectedWallet(c.DEFAULT_CHAIN || 'solana');
-    if (!liveWallet || !liveWallet.is_connected || !liveWallet.address) {
-      return { allowed: false, reason: 'no live wallet connected' };
+    const hasKeypair = Boolean(getTradingKeypair());
+    if (!hasKeypair) {
+      if (!liveWallet || !liveWallet.is_connected || !liveWallet.address) {
+        return { allowed: false, reason: 'no live wallet connected' };
+      }
+      if (liveWallet.is_read_only || !liveWallet.signing_available) {
+        return { allowed: false, reason: 'live wallet is read-only' };
+      }
     }
-    if (liveWallet.is_read_only || !liveWallet.signing_available) {
-      return { allowed: false, reason: 'live wallet is read-only' };
-    }
-    if (!getTradingKeypair()) {
-      return { allowed: false, reason: 'live trading keypair not configured' };
-    }
-    const bal = parseFloat(liveWallet.native_balance) || 0;
-    if (bal <= c.MIN_GAS_RESERVE_SOL) {
-      return { allowed: false, reason: 'insufficient SOL for gas reserve' };
+    if (liveWallet && liveWallet.is_connected) {
+      const bal = parseFloat(liveWallet.native_balance) || 0;
+      if (bal <= c.MIN_GAS_RESERVE_SOL) {
+        return { allowed: false, reason: 'insufficient SOL for gas reserve' };
+      }
     }
   } else {
     if (ledger.cash < c.trade_size_usd) {
@@ -1147,22 +1178,73 @@ async function executeBuy(
       const solPriceUsd = await getSolPriceUsd();
       const tradeSol = size / solPriceUsd;
       sniperLog(`⚡ [LIVE BUY START] ${symbol}: swapping ${tradeSol.toFixed(4)} SOL ($${size.toFixed(2)})...`, 'buy');
-      const liveRes = await executeLiveSolanaBuy({
-        tokenAddress: mint,
-        tokenSymbol: symbol,
-        tradeAmountSol: tradeSol,
-        tradeAmountUsd: size,
-        maxSlippageBps: Math.max(50, Math.round(c.slippage_pct * 100)),
-        priorityFeeLevel: c.PRIORITY_FEE_LEVEL || 'standard',
-        onStepProgress: (step, detail) => {
-          broadcastSse('execution_progress', { action: 'BUY', token: symbol, step, detail });
-        },
-      });
+
+      let liveRes;
+      if (getTradingKeypair()) {
+        liveRes = await executeLiveSolanaBuy({
+          tokenAddress: mint,
+          tokenSymbol: symbol,
+          tradeAmountSol: tradeSol,
+          tradeAmountUsd: size,
+          maxSlippageBps: Math.max(50, Math.round(c.slippage_pct * 100)),
+          priorityFeeLevel: c.PRIORITY_FEE_LEVEL || 'standard',
+          onStepProgress: (step, detail) => {
+            broadcastSse('execution_progress', { action: 'BUY', token: symbol, step, detail });
+          },
+        });
+      } else {
+        const liveWallet = getLiveConnectedWallet(c.DEFAULT_CHAIN || 'solana');
+        if (!liveWallet?.address) {
+          sniperLog(`✗ [LIVE BUY FAILED] ${symbol}: No connected Phantom wallet`, 'warn');
+          return false;
+        }
+        broadcastSse('execution_progress', { action: 'BUY', token: symbol, step: 'PREPARING', detail: 'Fetching Jupiter quote...' });
+        const prep = await prepareLiveBuyTransaction({
+          userPublicKey: liveWallet.address,
+          tokenAddress: mint,
+          tokenSymbol: symbol,
+          tradeAmountSol: tradeSol,
+          tradeAmountUsd: size,
+          maxSlippageBps: Math.max(50, Math.round(c.slippage_pct * 100)),
+          priorityFeeLevel: c.PRIORITY_FEE_LEVEL || 'standard',
+        });
+        if (!prep.success || !prep.base64Tx) {
+          sniperLog(`✗ [LIVE BUY FAILED] ${symbol}: ${prep.error}`, 'warn');
+          broadcastSse('execution_progress', { action: 'BUY', token: symbol, step: 'FAILED', error: prep.error });
+          return false;
+        }
+        broadcastSse('execution_progress', { action: 'BUY', token: symbol, step: 'PHANTOM_CONFIRM', detail: 'Approve swap in Phantom popup...' });
+        const sigRes = await requestBrowserWalletSignature({
+          action: 'BUY',
+          symbol,
+          mint,
+          base64Tx: prep.base64Tx,
+          userPublicKey: liveWallet.address,
+        });
+        if (!sigRes.signature) {
+          sniperLog(`✗ [LIVE BUY CANCELLED] ${symbol}: ${sigRes.error}`, 'warn');
+          broadcastSse('execution_progress', { action: 'BUY', token: symbol, step: 'FAILED', error: sigRes.error });
+          return false;
+        }
+        broadcastSse('execution_progress', { action: 'BUY', token: symbol, step: 'CONFIRMING', detail: `Confirming ${sigRes.signature.slice(0, 8)}...` });
+        liveRes = await finalizeBrowserSignedTransaction({
+          signature: sigRes.signature,
+          targetMint: mint,
+          userPubkey: liveWallet.address,
+          isBuy: true,
+          tradeAmountUsd: size,
+          tradeAmountSol: tradeSol,
+          estTokensOut: prep.estTokensOut,
+          solPriceUsd,
+        });
+      }
+
       if (!liveRes.success) {
         sniperLog(`✗ [LIVE BUY FAILED] ${symbol}: ${liveRes.error}`, 'warn');
         broadcastSse('execution_progress', { action: 'BUY', token: symbol, step: 'FAILED', error: liveRes.error });
         return false;
       }
+      broadcastSse('execution_progress', { action: 'BUY', token: symbol, step: 'CONFIRMED', detail: `Tx ${liveRes.signature?.slice(0, 8)}` });
       fill = liveRes.actualEffectivePriceUsd || fill;
       qty = liveRes.actualAmountOut || qty;
       txHash = liveRes.signature;
@@ -1244,22 +1326,72 @@ async function executeSell(mode: ExecutionMode, mint: string, price: number, rea
 
     if (mode === 'live') {
       sniperLog(`⚡ [LIVE SELL START] ${pos.symbol} (${reason})...`, 'sell');
-      const liveRes = await executeLiveSolanaSell({
-        tokenAddress: mint,
-        tokenSymbol: pos.symbol,
-        tokenQuantity: pos.qty,
-        tokenDecimals: pos.decimals || 6,
-        maxSlippageBps: Math.max(50, Math.round(c.slippage_pct * 100)),
-        priorityFeeLevel: 'high',
-        onStepProgress: (step, detail) => {
-          broadcastSse('execution_progress', { action: 'SELL', token: pos.symbol, step, detail });
-        },
-      });
+      const solPriceUsd = await getSolPriceUsd();
+      let liveRes;
+      if (getTradingKeypair()) {
+        liveRes = await executeLiveSolanaSell({
+          tokenAddress: mint,
+          tokenSymbol: pos.symbol,
+          tokenQuantity: pos.qty,
+          tokenDecimals: pos.decimals || 6,
+          maxSlippageBps: Math.max(50, Math.round(c.slippage_pct * 100)),
+          priorityFeeLevel: 'high',
+          onStepProgress: (step, detail) => {
+            broadcastSse('execution_progress', { action: 'SELL', token: pos.symbol, step, detail });
+          },
+        });
+      } else {
+        const liveWallet = getLiveConnectedWallet(c.DEFAULT_CHAIN || 'solana');
+        if (!liveWallet?.address) {
+          sniperLog(`✗ [LIVE SELL FAILED] ${pos.symbol}: No connected Phantom wallet`, 'warn');
+          return false;
+        }
+        broadcastSse('execution_progress', { action: 'SELL', token: pos.symbol, step: 'PREPARING', detail: 'Fetching Jupiter exit quote...' });
+        const prep = await prepareLiveSellTransaction({
+          userPublicKey: liveWallet.address,
+          tokenAddress: mint,
+          tokenSymbol: pos.symbol,
+          tokenQuantity: pos.qty,
+          tokenDecimals: pos.decimals || 6,
+          maxSlippageBps: Math.max(50, Math.round(c.slippage_pct * 100)),
+          priorityFeeLevel: 'high',
+        });
+        if (!prep.success || !prep.base64Tx) {
+          sniperLog(`✗ [LIVE SELL FAILED] ${pos.symbol}: ${prep.error}`, 'warn');
+          broadcastSse('execution_progress', { action: 'SELL', token: pos.symbol, step: 'FAILED', error: prep.error });
+          return false;
+        }
+        broadcastSse('execution_progress', { action: 'SELL', token: pos.symbol, step: 'PHANTOM_CONFIRM', detail: 'Approve sell in Phantom popup...' });
+        const sigRes = await requestBrowserWalletSignature({
+          action: 'SELL',
+          symbol: pos.symbol,
+          mint,
+          base64Tx: prep.base64Tx,
+          userPublicKey: liveWallet.address,
+        });
+        if (!sigRes.signature) {
+          sniperLog(`✗ [LIVE SELL CANCELLED] ${pos.symbol}: ${sigRes.error}`, 'warn');
+          broadcastSse('execution_progress', { action: 'SELL', token: pos.symbol, step: 'FAILED', error: sigRes.error });
+          return false;
+        }
+        broadcastSse('execution_progress', { action: 'SELL', token: pos.symbol, step: 'CONFIRMING', detail: `Confirming ${sigRes.signature.slice(0, 8)}...` });
+        liveRes = await finalizeBrowserSignedTransaction({
+          signature: sigRes.signature,
+          targetMint: mint,
+          userPubkey: liveWallet.address,
+          isBuy: false,
+          estSolReceived: prep.estSolReceived,
+          tokenQuantity: pos.qty,
+          solPriceUsd,
+        });
+      }
+
       if (!liveRes.success) {
         sniperLog(`✗ [LIVE SELL FAILED] ${pos.symbol}: ${liveRes.error}`, 'warn');
+        broadcastSse('execution_progress', { action: 'SELL', token: pos.symbol, step: 'FAILED', error: liveRes.error });
         return false;
       }
-      const solPriceUsd = await getSolPriceUsd();
+      broadcastSse('execution_progress', { action: 'SELL', token: pos.symbol, step: 'CONFIRMED', detail: `Tx ${liveRes.signature?.slice(0, 8)}` });
       const actualSol = liveRes.actualAmountOut || (proceeds / solPriceUsd);
       proceeds = actualSol * solPriceUsd;
       fill = liveRes.actualEffectivePriceUsd || (proceeds / pos.qty);
@@ -1937,26 +2069,26 @@ async function startServer() {
       case 'start_bot': {
         if (botConfig.EXECUTION_MODE === 'live') {
           const liveWallet = getLiveConnectedWallet(botConfig.DEFAULT_CHAIN || 'solana');
-          if (!liveWallet || !liveWallet.is_connected || !liveWallet.address) {
-            return res.status(400).json({
-              error: 'Cannot start Live mode: No live wallet connected for SOLANA. Connect your Phantom wallet first.',
-            });
+          const hasKeypair = Boolean(getTradingKeypair());
+          if (!hasKeypair) {
+            if (!liveWallet || !liveWallet.is_connected || !liveWallet.address) {
+              return res.status(400).json({
+                error: 'Cannot start Live mode: Connect your Phantom wallet first.',
+              });
+            }
+            if (liveWallet.is_read_only || !liveWallet.signing_available) {
+              return res.status(400).json({
+                error: `Cannot start Live mode: Connected wallet (${liveWallet.name}) is Read-Only.`,
+              });
+            }
           }
-          if (liveWallet.is_read_only || !liveWallet.signing_available) {
-            return res.status(400).json({
-              error: `Cannot start Live mode: Connected wallet (${liveWallet.name}) is Read-Only.`,
-            });
-          }
-          if (!getTradingKeypair()) {
-            return res.status(400).json({
-              error: 'Cannot start Live mode: Autonomous server signing keypair is required in Wallets tab to auto-sign swaps.',
-            });
-          }
-          const bal = parseFloat(liveWallet.native_balance) || 0;
-          if (bal <= botConfig.MIN_GAS_RESERVE_SOL) {
-            return res.status(400).json({
-              error: `Cannot start Live mode: Insufficient SOL balance (${bal.toFixed(4)} SOL). Keep above ${botConfig.MIN_GAS_RESERVE_SOL} SOL gas reserve.`,
-            });
+          if (liveWallet && liveWallet.is_connected) {
+            const bal = parseFloat(liveWallet.native_balance) || 0;
+            if (bal <= botConfig.MIN_GAS_RESERVE_SOL) {
+              return res.status(400).json({
+                error: `Cannot start Live mode: Insufficient SOL balance (${bal.toFixed(4)} SOL). Keep above ${botConfig.MIN_GAS_RESERVE_SOL} SOL gas reserve.`,
+              });
+            }
           }
         }
         startBotEngine();
@@ -2166,6 +2298,19 @@ async function startServer() {
     clearTradingKeypair();
     disconnectLiveWallet('solana');
     res.json({ success: true, message: 'Trading signer cleared' });
+  });
+
+  app.post('/api/live-tx/:id/complete', (req, res) => {
+    const id = req.params.id;
+    const entry = pendingBrowserTxs.get(id);
+    if (!entry) {
+      return res.status(404).json({ error: 'Pending transaction expired or not found.' });
+    }
+    pendingBrowserTxs.delete(id);
+    clearTimeout(entry.timer);
+    const { signature, error } = req.body || {};
+    entry.resolve({ signature, error });
+    res.json({ success: true });
   });
 
   // ---------------- CSV EXPORT ----------------

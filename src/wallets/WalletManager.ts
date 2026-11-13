@@ -9,6 +9,8 @@
  * - Paper simulation isolated from Live execution
  */
 
+import { VersionedTransaction } from '@solana/web3.js';
+
 export type WalletId = 'phantom' | 'solflare' | 'metamask' | 'trustwallet' | 'coinbase' | 'ledger' | 'paper';
 export type AppExecutionMode = 'paper' | 'testnet' | 'live';
 
@@ -749,6 +751,44 @@ export class WalletManager {
       lastUpdatedSecondsAgo: secondsAgo,
       rpcEndpoint: active.rpcEndpoint || 'https://api.mainnet-beta.solana.com',
     };
+  }
+
+  /**
+   * Deserialize a base64 Jupiter VersionedTransaction and prompt Phantom / Solflare in browser to sign & send it.
+   */
+  public async signAndSendSolanaTransaction(base64Tx: string): Promise<{ success: boolean; signature?: string; error?: string }> {
+    try {
+      const provider =
+        (this.activeWalletId === 'solflare' ? window.solflare : null) ||
+        window.phantom?.solana ||
+        (window.solana?.isPhantom ? window.solana : null) ||
+        window.solflare ||
+        window.solana;
+
+      if (!provider) {
+        return { success: false, error: 'Phantom or Solflare browser extension not found.' };
+      }
+      if (!provider.isConnected && typeof provider.connect === 'function') {
+        await provider.connect();
+      }
+      if (typeof provider.signAndSendTransaction !== 'function') {
+        return { success: false, error: 'Connected wallet does not support signAndSendTransaction.' };
+      }
+
+      const bin = atob(base64Tx);
+      const bytes = new Uint8Array(bin.length);
+      for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+      const tx = VersionedTransaction.deserialize(bytes);
+
+      const res = await provider.signAndSendTransaction(tx);
+      const signature = typeof res === 'string' ? res : res?.signature;
+      if (!signature) {
+        return { success: false, error: 'Wallet did not return a transaction signature.' };
+      }
+      return { success: true, signature };
+    } catch (err: any) {
+      return { success: false, error: err?.message || 'Transaction rejected in Phantom wallet.' };
+    }
   }
 }
 

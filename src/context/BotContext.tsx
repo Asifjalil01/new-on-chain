@@ -425,11 +425,29 @@ export const BotProvider: React.FC<{ children: React.ReactNode }> = ({ children 
           }
         } catch {}
       });
+      evtSource.addEventListener('pending_browser_sign', async (e) => {
+        try {
+          const req = JSON.parse(e.data);
+          if (!req?.id || !req?.base64Tx) return;
+          say(`Phantom confirmation required: ${req.action} ${req.symbol}`, 'neutral', 10000);
+          const signRes = await walletManager.signAndSendSolanaTransaction(req.base64Tx);
+          await fetch(`/api/live-tx/${encodeURIComponent(req.id)}/complete`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(signRes),
+          });
+          if (signRes.success) {
+            say(`${req.action} ${req.symbol} signed in Phantom! Confirming on-chain...`, 'success');
+          } else {
+            say(`${req.action} ${req.symbol} cancelled: ${signRes.error}`, 'error', 6000);
+          }
+        } catch {}
+      });
     } catch {}
     return () => {
       if (evtSource) evtSource.close();
     };
-  }, [refreshTelemetry, refreshTrades]);
+  }, [refreshTelemetry, refreshTrades, say]);
 
   // ---------------- WALLETS (PRESERVED PHANTOM INTEGRATION) ----------------
   const [isWalletModalOpen, setIsWalletModalOpen] = useState(false);
