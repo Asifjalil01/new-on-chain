@@ -63,6 +63,10 @@ declare global {
     trustwallet?: any;
     coinbaseWalletExtension?: any;
     solflare?: any;
+    desktopAPI?: {
+      isDesktop: boolean;
+      platform: string;
+    };
   }
 }
 

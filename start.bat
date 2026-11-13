@@ -1,10 +1,10 @@
 @echo off
-title On-Chain SPOT Bot v2
+title Solana Launch Sniper - Desktop App
 echo ====================================================================
-echo             ◈ ON-CHAIN SPOT BOT v2 - LOCAL RUNNER
+echo         SOLANA LAUNCH SNIPER - STANDALONE DESKTOP SOFTWARE
 echo ====================================================================
 echo.
-echo [1/3] Checking environment...
+echo [1/2] Checking Node.js runtime...
 where node >nul 2>nul
 if %errorlevel% neq 0 (
     echo [ERROR] Node.js is not found on your system!
@@ -14,39 +14,12 @@ if %errorlevel% neq 0 (
     exit /b 1
 )
 
-echo [2/3] Checking dependencies & esbuild runtime...
-if not exist node_modules (
-    echo Installing dependencies (first run)...
-    call npm install
-) else (
-    REM Check if esbuild binary is working properly
-    npx esbuild --version >nul 2>nul
-    if %errorlevel% neq 0 (
-        echo Esbuild runtime update required...
-        call npm install -D esbuild@^0.28.0
-        call npm install
-    )
-)
-
-echo [3/3] Starting Bot Engine and Web GUI...
+echo [2/2] Launching Standalone Desktop GUI Window (no browser needed)...
+echo (First launch downloads desktop runtime dependencies automatically.)
 echo.
-echo The dashboard will automatically open in your default browser at:
-echo http://localhost:3000
-echo.
-echo Press Ctrl+C in this window at any time to stop the bot.
-echo ====================================================================
-echo.
-
-timeout /t 2 /nobreak >nul
-start http://localhost:3000
-
-call npm run dev
+call npm run desktop
 if %errorlevel% neq 0 (
     echo.
-    echo Bot stopped with an issue. Running automated dependency repair...
-    call npm install -D esbuild@^0.28.0
-    call npm install
-    echo Retrying launch...
-    call npm run dev
+    echo Desktop app exited with an error. Check the log above.
+    pause
 )
-pause

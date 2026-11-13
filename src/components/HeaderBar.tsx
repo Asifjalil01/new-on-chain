@@ -5,9 +5,11 @@ import { useBot } from '../context/BotContext';
 export const HeaderBar: React.FC = () => {
   const {
     config,
+    status,
     botStatus,
     positions,
     activeWallet,
+    signerStatus,
     setIsWalletModalOpen,
     requestModeChange,
     theme,
@@ -27,6 +29,21 @@ export const HeaderBar: React.FC = () => {
   const isLive = mode === 'live';
   const isTestnet = mode === 'testnet';
   const isPaper = mode === 'paper';
+
+  const browserWalletConnected = Boolean(activeWallet.address && activeWallet.id !== 'paper');
+  const signerConnected = Boolean(signerStatus?.configured && signerStatus?.address);
+  const serverWallet = status?.live_wallet;
+  const connectedLiveAddress = browserWalletConnected
+    ? activeWallet.address
+    : signerConnected
+    ? signerStatus!.address
+    : serverWallet?.address || null;
+  const connectedLiveBalanceSol = browserWalletConnected
+    ? activeWallet.nativeBalance
+    : signerConnected && typeof signerStatus?.balanceSol === 'number'
+    ? signerStatus.balanceSol
+    : null;
+  const connectedLiveSymbol = browserWalletConnected ? activeWallet.nativeSymbol : 'SOL';
 
   const priceAgeSec = botStatus.last_price_time
     ? Math.max(0, (nowMs - botStatus.last_price_time) / 1000)
@@ -64,7 +81,7 @@ export const HeaderBar: React.FC = () => {
         </p>
       </div>
 
-      {/* Right: Mode Switcher, Phantom Wallet, Status Readout, Start/Stop CTA, Theme Toggle */}
+      {/* Right: Mode Switcher, Wallet, Status Readout, Start/Stop CTA, Theme Toggle */}
       <div className="flex items-center gap-3 flex-wrap shrink-0">
         {/* Mode Switcher */}
         <div
@@ -108,32 +125,34 @@ export const HeaderBar: React.FC = () => {
           </button>
         </div>
 
-        {/* Phantom Wallet Button */}
+        {/* Wallet / Desktop Signer Button */}
         <button
           type="button"
           onClick={() => setIsWalletModalOpen(true)}
           className={`flex items-center gap-2 px-3 py-1.5 rounded-lg border text-xs font-semibold transition-colors cursor-pointer whitespace-nowrap shrink-0 ${
-            isLive && (!activeWallet.address || activeWallet.id === 'paper')
+            isLive && !connectedLiveAddress
               ? 'border-[var(--red)] bg-[var(--red)]/10 text-[var(--red)]'
               : 'border-[var(--border-bright)] bg-[var(--card)] text-[var(--text)] hover:border-[var(--teal)]'
           }`}
           title={
-            activeWallet.address
-              ? `${activeWallet.name}: ${activeWallet.address}`
-              : 'Connect Phantom / Solflare Wallet'
+            connectedLiveAddress
+              ? `${browserWalletConnected ? activeWallet.name : 'Desktop Live Signer'}: ${connectedLiveAddress}`
+              : 'Connect Phantom / Import Desktop Signer Key'
           }
         >
           <Wallet size={14} className={isLive ? 'text-[var(--red)]' : 'text-[var(--teal)]'} />
           <span>
-            {activeWallet.address && activeWallet.id !== 'paper'
-              ? `${activeWallet.name.split(' ')[0]} · ${activeWallet.address.slice(0, 4)}...${activeWallet.address.slice(-4)}`
+            {browserWalletConnected && connectedLiveAddress
+              ? `${activeWallet.name.split(' ')[0]} · ${connectedLiveAddress.slice(0, 4)}...${connectedLiveAddress.slice(-4)}`
+              : connectedLiveAddress
+              ? `Signer · ${connectedLiveAddress.slice(0, 4)}...${connectedLiveAddress.slice(-4)}`
               : isLive
-              ? 'Connect Phantom'
-              : 'Phantom Wallet'}
+              ? 'Connect Wallet'
+              : 'Phantom / Keypair'}
           </span>
-          {activeWallet.address && activeWallet.id !== 'paper' && (
+          {connectedLiveBalanceSol !== null && (
             <span className="font-mono text-[var(--muted)] border-l border-[var(--border)] pl-2 tabular-nums">
-              {activeWallet.nativeBalance.toFixed(4)} {activeWallet.nativeSymbol}
+              {connectedLiveBalanceSol.toFixed(4)} {connectedLiveSymbol}
             </span>
           )}
         </button>

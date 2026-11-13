@@ -1,0 +1,51 @@
+{
+  "name": "solana-launch-sniper-desktop",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Standalone Desktop GUI for Solana Launch Sniper",
+  "main": "main.cjs",
+  "scripts": {
+    "start": "electron .",
+    "dist": "electron-builder"
+  },
+  "devDependencies": {
+    "electron": "^35.0.0",
+    "electron-builder": "^26.0.12"
+  },
+  "build": {
+    "appId": "com.sniper.solanalaunch",
+    "productName": "Solana Launch Sniper",
+    "directories": {
+      "output": "../release"
+    },
+    "files": [
+      "main.cjs",
+      "preload.cjs"
+    ],
+    "extraResources": [
+      {
+        "from": "../",
+        "to": "app-runtime",
+        "filter": [
+          "server.ts",
+          "package.json",
+          "tsconfig.json",
+          "vite.config.ts",
+          "index.html",
+          "src/**/*",
+          "dist/**/*",
+          "node_modules/**/*"
+        ]
+      }
+    ],
+    "win": {
+      "target": ["portable"]
+    },
+    "mac": {
+      "target": ["dmg"]
+    },
+    "linux": {
+      "target": ["AppImage"]
+    }
+  }
+}

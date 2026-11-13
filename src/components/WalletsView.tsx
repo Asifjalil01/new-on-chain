@@ -94,7 +94,28 @@ export const WalletsView: React.FC = () => {
     }
   };
 
-  const hasLiveConnected = isLive && activeWallet.connected && Boolean(activeWallet.address) && activeWallet.id !== 'paper';
+  const signerConnected = Boolean(signerStatus?.configured && signerStatus?.address);
+  const browserConnected = activeWallet.connected && Boolean(activeWallet.address) && activeWallet.id !== 'paper';
+  const hasLiveConnected = isLive && (browserConnected || signerConnected);
+  const effectiveAddress = browserConnected ? activeWallet.address : signerConnected ? signerStatus!.address : activeWallet.address;
+  const effectiveName = browserConnected
+    ? activeWallet.name
+    : signerConnected
+    ? 'Solana Trading Keypair (Desktop)'
+    : activeWallet.name;
+  const effectiveBalanceSol = browserConnected
+    ? activeWallet.nativeBalance
+    : signerConnected && typeof signerStatus?.balanceSol === 'number'
+    ? signerStatus.balanceSol
+    : activeWallet.nativeBalance;
+  const effectiveBalanceUsd = browserConnected
+    ? activeWallet.balanceUsd
+    : signerConnected && typeof signerStatus?.balanceUsd === 'number'
+    ? signerStatus.balanceUsd
+    : activeWallet.balanceUsd;
+  const effectiveReady =
+    walletDiagnostics?.liveTradingReadiness === 'READY' ||
+    (signerConnected && (signerStatus?.balanceSol ?? 0) >= Number(config.MIN_GAS_RESERVE_SOL || 0.01));
   const startBal = Number(config.start_balance_usd ?? 50);
 
   return (
@@ -118,12 +139,12 @@ export const WalletsView: React.FC = () => {
               ? 'Real on-chain Solana mainnet wallet execution. Paper vault isolated.'
               : isTestnet
               ? 'Testnet / devnet RPC context.'
-              : `Paper trading simulation active ($${startBal.toFixed(2)} starting balance). Connect Phantom anytime for Live trading.`}
+              : `Paper trading simulation active ($${startBal.toFixed(2)} starting balance). Connect Phantom or set a Desktop Signer anytime for Live trading.`}
           </span>
         </div>
       </div>
 
-      {/* Live Mode Warning if no real wallet connected */}
+      {/* Live Mode Warning if no real wallet or signer connected */}
       {isLive && !hasLiveConnected && (
         <div className="bg-[var(--red)]/10 border border-[var(--red)] rounded-lg p-4 flex flex-col md:flex-row items-start md:items-center justify-between gap-3 text-xs">
           <div className="flex items-start gap-3">
@@ -131,7 +152,7 @@ export const WalletsView: React.FC = () => {
             <div>
               <p className="font-bold text-[var(--red)] text-sm">Real Solana wallet required for Live mode</p>
               <p className="text-[var(--text)] mt-1">
-                Connect your Phantom or Solflare browser wallet below before starting the sniper in Live mode.
+                Import your Phantom private key in the Desktop Live Signer section below (or connect a Phantom browser wallet) before starting Live mode.
               </p>
             </div>
           </div>
@@ -141,7 +162,7 @@ export const WalletsView: React.FC = () => {
             className="px-4 py-2 rounded-lg bg-[var(--red)] text-white font-semibold hover:brightness-110 flex items-center gap-2 cursor-pointer shrink-0 whitespace-nowrap"
           >
             <Wallet size={14} />
-            <span>Connect Phantom wallet</span>
+            <span>Connect wallet / keypair</span>
           </button>
         </div>
       )}
@@ -173,8 +194,10 @@ export const WalletsView: React.FC = () => {
           <div className="p-3 bg-[var(--panel)]/60 border border-[var(--border)] rounded-lg flex flex-col justify-between">
             <div className="text-[11px] text-[var(--dim)] font-medium">Provider &amp; network</div>
             <div className="mt-1">
-              <div className="text-sm font-bold text-[var(--text)]">{activeWallet.name}</div>
-              <div className="text-[11px] text-[var(--teal)] mt-0.5">{activeWallet.network}</div>
+              <div className="text-sm font-bold text-[var(--text)]">{effectiveName}</div>
+              <div className="text-[11px] text-[var(--teal)] mt-0.5">
+                {signerConnected && !browserConnected ? 'Solana Mainnet-Beta' : activeWallet.network}
+              </div>
             </div>
             <div className="mt-2 pt-2 border-t border-[var(--border)] text-[10px] text-[var(--muted)] font-mono truncate">
               RPC: {walletDiagnostics?.rpcEndpoint || 'https://api.mainnet-beta.solana.com'}
@@ -184,14 +207,14 @@ export const WalletsView: React.FC = () => {
           <div className="p-3 bg-[var(--panel)]/60 border border-[var(--border)] rounded-lg flex flex-col justify-between">
             <div className="text-[11px] text-[var(--dim)] font-medium">Connected address</div>
             <div className="mt-1">
-              {activeWallet.address ? (
+              {effectiveAddress ? (
                 <div className="flex items-center gap-1.5">
                   <span className="text-xs font-bold text-[var(--teal)] font-mono">
-                    {activeWallet.address.slice(0, 6)}...{activeWallet.address.slice(-4)}
+                    {effectiveAddress.slice(0, 6)}...{effectiveAddress.slice(-4)}
                   </span>
                   <button
                     type="button"
-                    onClick={() => handleCopyDiag(activeWallet.address!)}
+                    onClick={() => handleCopyDiag(effectiveAddress)}
                     className="p-1 rounded text-[var(--dim)] hover:text-[var(--teal)] cursor-pointer"
                     title="Copy public key"
                   >
@@ -202,13 +225,13 @@ export const WalletsView: React.FC = () => {
                 <span className="text-xs font-semibold text-[var(--dim)]">Not connected</span>
               )}
               <div className="text-[11px] text-[var(--muted)] mt-0.5">
-                {activeWallet.connected ? 'Connected' : 'Disconnected'}
+                {browserConnected || signerConnected ? 'Connected' : 'Disconnected'}
               </div>
             </div>
             <div className="mt-2 pt-2 border-t border-[var(--border)] text-[11px] text-[var(--muted)] flex items-center justify-between font-mono">
               <span>Backend sync</span>
-              <span className={walletDiagnostics?.backendSync === 'SYNCED' ? 'text-[var(--green)] font-semibold' : 'text-[var(--yellow)] font-semibold'}>
-                {walletDiagnostics?.backendSync || 'NOT SYNCED'}
+              <span className={walletDiagnostics?.backendSync === 'SYNCED' || signerConnected ? 'text-[var(--green)] font-semibold' : 'text-[var(--yellow)] font-semibold'}>
+                {signerConnected ? 'SYNCED' : walletDiagnostics?.backendSync || 'NOT SYNCED'}
               </span>
             </div>
           </div>
@@ -217,15 +240,15 @@ export const WalletsView: React.FC = () => {
             <div className="text-[11px] text-[var(--dim)] font-medium">On-chain balance</div>
             <div className="mt-1 font-mono tabular-nums">
               <div className="text-base font-bold text-[var(--text)]">
-                {activeWallet.nativeBalance.toFixed(5)} {activeWallet.nativeSymbol}
+                {effectiveBalanceSol.toFixed(5)} {browserConnected ? activeWallet.nativeSymbol : 'SOL'}
               </div>
               <div className="text-[11px] text-[var(--green)] font-semibold mt-0.5">
-                {formatUsd(activeWallet.balanceUsd)} USD
+                {formatUsd(effectiveBalanceUsd)} USD
               </div>
             </div>
             <div className="mt-2 pt-2 border-t border-[var(--border)] text-[11px] text-[var(--dim)] flex items-center justify-between font-mono tabular-nums">
               <span>Gas reserve</span>
-              <span>{config.MIN_GAS_RESERVE_SOL || activeWallet.gasReserved} {activeWallet.nativeSymbol}</span>
+              <span>{config.MIN_GAS_RESERVE_SOL || activeWallet.gasReserved} {browserConnected ? activeWallet.nativeSymbol : 'SOL'}</span>
             </div>
           </div>
 
@@ -233,23 +256,25 @@ export const WalletsView: React.FC = () => {
             <div className="text-[11px] text-[var(--dim)] font-medium">Live readiness</div>
             <div className="mt-1">
               <div className="flex items-center gap-1.5">
-                {walletDiagnostics?.liveTradingReadiness === 'READY' ? (
+                {effectiveReady ? (
                   <CheckCircle2 size={15} className="text-[var(--green)] shrink-0" />
                 ) : (
                   <XCircle size={15} className="text-[var(--red)] shrink-0" />
                 )}
-                <span className={`text-xs font-bold ${walletDiagnostics?.liveTradingReadiness === 'READY' ? 'text-[var(--green)]' : 'text-[var(--red)]'}`}>
-                  {walletDiagnostics?.liveTradingReadiness || 'NOT READY'}
+                <span className={`text-xs font-bold ${effectiveReady ? 'text-[var(--green)]' : 'text-[var(--red)]'}`}>
+                  {effectiveReady ? 'READY' : walletDiagnostics?.liveTradingReadiness || 'NOT READY'}
                 </span>
               </div>
               <div className="text-[11px] text-[var(--muted)] mt-1 line-clamp-2">
-                {walletDiagnostics?.readinessReason || 'Checking prerequisites...'}
+                {signerConnected
+                  ? 'Desktop/local keypair configured. Ready for autonomous live execution.'
+                  : walletDiagnostics?.readinessReason || 'Checking prerequisites...'}
               </div>
             </div>
             <div className="mt-2 pt-2 border-t border-[var(--border)] text-[11px] text-[var(--dim)] flex items-center justify-between font-mono">
               <span>Signing</span>
               <span className="font-semibold text-[var(--teal)]">
-                {activeWallet.signingAvailable ? 'Browser prompt' : 'Read-only'}
+                {signerConnected ? 'Local keypair' : activeWallet.signingAvailable ? 'Browser prompt' : 'Read-only'}
               </span>
             </div>
           </div>
@@ -268,22 +293,22 @@ export const WalletsView: React.FC = () => {
           </div>
           <div>
             <div className="flex items-center gap-2 flex-wrap">
-              <span className="font-bold text-[var(--text)] text-sm">{activeWallet.name}</span>
+              <span className="font-bold text-[var(--text)] text-sm">{effectiveName}</span>
               <span className="text-[11px] text-[var(--dim)] font-mono">
-                {isLive ? '· Live wallet' : `· ${activeWallet.type}`}
+                {isLive ? '· Live wallet' : `· ${signerConnected && !browserConnected ? 'keypair' : activeWallet.type}`}
               </span>
             </div>
             <div className="text-xs text-[var(--muted)] flex items-center gap-2 mt-0.5 font-mono flex-wrap tabular-nums">
               <span>
-                {activeWallet.address
-                  ? `${activeWallet.address.slice(0, 10)}...${activeWallet.address.slice(-6)}`
+                {effectiveAddress
+                  ? `${effectiveAddress.slice(0, 10)}...${effectiveAddress.slice(-6)}`
                   : isLive
                   ? 'Disconnected'
                   : 'Simulated paper account'}
               </span>
               <span aria-hidden="true">·</span>
               <span className={`font-bold ${isLive ? 'text-[var(--red)]' : 'text-[var(--teal)]'}`}>
-                {activeWallet.nativeBalance.toFixed(5)} {activeWallet.nativeSymbol} ({formatUsd(activeWallet.balanceUsd)})
+                {effectiveBalanceSol.toFixed(5)} {browserConnected ? activeWallet.nativeSymbol : 'SOL'} ({formatUsd(effectiveBalanceUsd)})
               </span>
             </div>
           </div>
@@ -295,7 +320,7 @@ export const WalletsView: React.FC = () => {
           className="px-4 py-2 rounded-lg font-semibold bg-[var(--teal)] text-white hover:brightness-110 flex items-center gap-2 cursor-pointer text-xs whitespace-nowrap shrink-0"
         >
           <ArrowRightLeft size={13} />
-          <span>Switch / connect Phantom wallet</span>
+          <span>Switch / connect wallet</span>
         </button>
       </div>
 
