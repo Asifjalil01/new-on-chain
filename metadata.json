@@ -1,0 +1,6 @@
+{
+  "name": "On-Chain SPOT Bot v2",
+  "description": "Professional Multi-Chain On-Chain SPOT Trading Bot with Rug & Honeypot Defense, Tiered Universe Scanner, Trailing Profit Engine, and Live DEX Analytics",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

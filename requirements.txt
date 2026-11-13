@@ -1,0 +1,10 @@
+# Python requirements for On-Chain SPOT Bot v2
+# Standard library is used for zero-dependency portability (sqlite3, urllib, json, unittest, asyncio)
+# Optional production packages:
+requests>=2.31.0
+aiohttp>=3.9.0
+pyyaml>=6.0.1
+web3>=6.15.0
+solders>=0.21.0
+solana>=0.34.0
+pytest>=8.0.0

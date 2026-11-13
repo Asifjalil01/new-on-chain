@@ -1,0 +1,92 @@
+# ON-CHAIN SPOT BOT v2.1.1 CONFIGURATION
+# Production Quantitative Filter & Discovery Settings
+
+app_name: "On-Chain SPOT Bot v2.1.1"
+default_chain: "solana"
+chains_to_scan:
+  - "solana"
+  - "base"
+  - "ethereum"
+  - "bsc"
+
+execution_mode: "paper" # "paper" | "testnet" | "mainnet"
+total_capital_usd: 1600.0
+max_positions: 5
+max_position_size_usd: 100.0
+trade_allocation_amount: 0.005 # e.g. 0.005 SOL per trade
+trade_allocation_currency: "SOL" # "SOL" | "ETH" | "BNB" | "USDT" | "USDC"
+sell_cooldown_minutes: 30
+
+# GAS & SAFETY RESERVES
+gas_reserves:
+  min_gas_reserve_sol: 0.02
+  min_gas_reserve_eth: 0.005
+  priority_fee_level: "standard" # "standard" | "high" | "ultra"
+
+# HARD QUANTITATIVE PRE-FILTER REJECT RULES (DELIVERABLE 3)
+prefilter_thresholds:
+  min_liquidity_usd: 25000.0        # Rejects pools under $25,000 liquidity
+  min_volume_24h_usd: 50000.0       # Rejects pairs with < $50,000 24h volume
+  min_txns_24h: 200                 # Rejects contracts with < 200 24h transactions
+  min_traders_24h: 100              # Rejects single-actor bot manipulation
+  min_age_minutes: 30               # Anti-sniper minimum pool maturity
+  max_age_days: 365                 # Rejects stale multi-year dead contracts
+  max_fdv_liquidity_ratio: 100.0    # Rejects extreme low-float dilution cliffs
+  max_volume_liquidity_ratio: 40.0  # Rejects circular wash trading bots
+  max_price_impact_pct: 2.0         # Rejects if position size incurs > 2% slippage
+
+# RUG DEFENSE & CONTRACT SECURITY
+security_thresholds:
+  max_buy_tax_percent: 3.0
+  max_sell_tax_percent: 3.0
+  require_lp_locked_or_burned: true
+  require_mint_authority_revoked: true
+  require_freeze_authority_revoked: true
+  max_top10_concentration_percent: 35.0
+  min_quality_score: 75.0
+  min_trade_score: 70.0
+
+# POSITION RISK MANAGEMENT & SLOT ROTATION
+risk_management:
+  stop_loss_pct: -8.0               # Exits trade on -8% drawdown
+  max_holding_hours: 4.0            # Exits stagnant trades after 4 hours
+  enable_slot_rotation: true        # Rotates weakest slot when top runner found
+  rotation_min_score: 85.0          # Candidate score must be >= 85 to rotate
+  rotation_max_target_score: 70.0   # Open position must have score <= 70 to be rotated
+  rotation_min_holding_minutes: 15  # Minimum holding duration before eligible for rotation
+
+# STEPPED TRAILING PROFIT LADDER
+trailing_tiers:
+  - [5.0, 1.0]    # +5% gain -> lock +4% floor
+  - [10.0, 1.5]   # +10% gain -> lock +8.5% floor
+  - [15.0, 2.0]   # +15% gain -> lock +13% floor
+  - [20.0, 1.0]   # +20% gain -> lock +19% floor
+  - [40.0, 2.0]   # +40% gain -> lock +38% floor
+  - [60.0, 3.0]   # +60% gain -> lock +57% floor
+  - [80.0, 4.0]   # +80% gain -> lock +76% floor
+  - [100.0, 5.0]  # +100% gain -> lock +95% floor
+  - [150.0, 8.0]  # +150% gain -> lock +142% floor
+  - [200.0, 10.0] # +200% gain -> lock +190% floor
+  - [300.0, 15.0] # +300% gain -> lock +285% floor
+  - [500.0, 25.0] # +500% gain -> lock +475% floor
+
+# DISCOVERY SOURCES & RATE LIMIT ASSUMPTIONS
+discovery_sources:
+  dexscreener:
+    rate_limit_req_per_min: 300
+    endpoints:
+      - "https://api.dexscreener.com/token-boosts/latest/v1"
+      - "https://api.dexscreener.com/token-boosts/top/v1"
+      - "https://api.dexscreener.com/token-profiles/latest/v1"
+      - "https://api.dexscreener.com/community-takeovers/latest/v1"
+      - "https://api.dexscreener.com/tokens/v1/{chainId}/{tokenAddresses}"
+  geckoterminal:
+    rate_limit_req_per_min: 30
+    endpoints:
+      - "https://api.geckoterminal.com/api/v2/networks/{network}/new_pools"
+      - "https://api.geckoterminal.com/api/v2/networks/{network}/trending_pools"
+      - "https://api.geckoterminal.com/api/v2/networks/{network}/pools?sort=h24_volume_usd_desc"
+
+scan_schedule:
+  scan_interval_seconds: 30
+  target_candidates_per_cycle: "300 - 1000"

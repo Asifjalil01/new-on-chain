@@ -1,0 +1,84 @@
+@import "tailwindcss";
+@custom-variant dark (&:where(.dark, .dark *));
+
+@layer base {
+  :root {
+    --bg: #0b1117;
+    --panel: #111922;
+    --card: #15202b;
+    --card-hover: #1b2836;
+    --border: #233344;
+    --border-bright: #334a62;
+    --teal: #10b981;
+    --blue: #3b82f6;
+    --green: #22c55e;
+    --red: #ef4444;
+    --yellow: #eab308;
+    --orange: #f97316;
+    --text: #f1f5f9;
+    --muted: #94a3b8;
+    --dim: #64748b;
+  }
+
+  :root[data-theme="light"] {
+    --bg: #f4f5f7;
+    --panel: #ffffff;
+    --card: #ffffff;
+    --card-hover: #f8fafc;
+    --border: #dde1e6;
+    --border-bright: #cbd5e1;
+    --teal: #0b7a3b;
+    --blue: #1d4ed8;
+    --green: #0b7a3b;
+    --red: #c62828;
+    --yellow: #b45309;
+    --orange: #b45309;
+    --text: #101828;
+    --muted: #475467;
+    --dim: #667085;
+  }
+
+  body {
+    background-color: var(--bg);
+    color: var(--text);
+    font-family: 'Plus Jakarta Sans', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+    margin: 0;
+    padding: 0;
+    overflow: hidden;
+    user-select: text;
+    scrollbar-width: thin;
+    scrollbar-color: var(--border-bright) var(--bg);
+  }
+
+  .font-mono,
+  code,
+  pre,
+  .tabular-nums {
+    font-family: 'JetBrains Mono', Consolas, 'SF Mono', Monaco, Menlo, monospace;
+    font-variant-numeric: tabular-nums;
+  }
+
+  ::-webkit-scrollbar {
+    width: 6px;
+    height: 6px;
+  }
+  ::-webkit-scrollbar-track {
+    background: var(--bg);
+  }
+  ::-webkit-scrollbar-thumb {
+    background: var(--border-bright);
+    border-radius: 3px;
+  }
+  ::-webkit-scrollbar-thumb:hover {
+    background: var(--teal);
+  }
+
+  input[type="number"]::-webkit-outer-spin-button,
+  input[type="number"]::-webkit-inner-spin-button {
+    -webkit-appearance: none;
+    margin: 0;
+  }
+  input[type="number"] {
+    -moz-appearance: textfield;
+  }
+}
