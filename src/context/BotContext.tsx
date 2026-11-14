@@ -195,6 +195,8 @@ const DEFAULT_CLIENT_CONFIG = {
   daily_loss_limit_usd: 10.0,
   take_profit_pct: 50.0,
   trailing_stop_pct: 0.0,
+  stop_loss_pct: 35.0,
+  rug_exit_drop_pct: 85.0,
   max_hold_minutes: 120,
   max_age_minutes: 2.0,
   ultra_early_grace_sec: 10,

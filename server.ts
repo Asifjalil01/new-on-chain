@@ -42,6 +42,8 @@ export interface SniperConfig {
   daily_loss_limit_usd: number;
   take_profit_pct: number;
   trailing_stop_pct: number;
+  stop_loss_pct: number;
+  rug_exit_drop_pct: number;
   max_hold_minutes: number;
   // Sniper window & grace
   max_age_minutes: number;
@@ -91,6 +93,8 @@ export const DEFAULT_CONFIG: SniperConfig = {
   daily_loss_limit_usd: 10.0,
   take_profit_pct: 50.0,
   trailing_stop_pct: 0.0,
+  stop_loss_pct: 35.0,
+  rug_exit_drop_pct: 85.0,
   max_hold_minutes: 120,
   max_age_minutes: 2.0,
   ultra_early_grace_sec: 10,
@@ -133,6 +137,8 @@ export const SETTING_LIMITS: Record<string, [number, number]> = {
   daily_loss_limit_usd: [0, 1e7],
   take_profit_pct: [0, 1e5],
   trailing_stop_pct: [0, 1000],
+  stop_loss_pct: [0, 99.9],
+  rug_exit_drop_pct: [0, 99.9],
   max_hold_minutes: [1, 1e5],
   max_age_minutes: [0.05, 60],
   ultra_early_grace_sec: [0, 300],
@@ -327,6 +333,9 @@ export interface SniperPosition {
   tx_hash_buy?: string;
   explorer_url?: string;
   mode: ExecutionMode;
+  last_seen_price_at?: number;
+  failed_sell_attempts?: number;
+  last_liquidity_usd?: number;
 }
 
 export interface SniperTradeRow {
@@ -971,10 +980,16 @@ export function passesFilters(pair: any, cfg: SniperConfig, nowMs = Date.now()):
   if (ratio > 0 && buys < sells * ratio) {
     return [false, 'selling pressure', `${buys}b/${sells}s in last 5m`];
   }
+  if (sells >= 5 && sells > Math.max(1, buys) * 2.5) {
+    return [false, 'heavy initial dump', `${buys}b/${sells}s`];
+  }
 
   const m5c = _f(pair?.priceChange?.m5);
   if (m5c !== null && m5c > (cfg.max_price_change_m5_pct ?? 300)) {
     return [false, 'already pumped', `+${m5c.toFixed(0)}% in 5m`];
+  }
+  if (m5c !== null && m5c <= -35) {
+    return [false, 'already dumping', `${m5c.toFixed(0)}% in 5m`];
   }
 
   if (ageS > (cfg.ultra_early_grace_sec ?? 10)) {
@@ -1077,7 +1092,7 @@ export async function hardRugCheck(mint: string, cfg: SniperConfig, ageS: number
           const name = String(risk?.name || '');
           const low = name.toLowerCase();
           if (level !== 'danger') {
-            if (low.includes('holder') && !young) {
+            if (low.includes('holder')) {
               const txt = `${String(risk?.description || '')} ${name}`;
               const m = txt.match(/([\d.]+)\s*%/);
               if (m && parseFloat(m[1]) > (cfg.max_top10_holder_pct ?? 75)) {
@@ -1087,7 +1102,7 @@ export async function hardRugCheck(mint: string, cfg: SniperConfig, ageS: number
             }
             continue;
           }
-          if (young && (low.includes('liquidity') || low.includes('lp'))) continue;
+          if (ageS < 30 && (low.includes('liquidity') || low.includes('lp'))) continue;
           if (!strict && !(low.includes('mint') || low.includes('freeze') || low.includes('authorit') || low.includes('holder'))) {
             continue;
           }
@@ -1270,6 +1285,8 @@ async function executeBuy(
       tx_hash_buy: txHash,
       explorer_url: explorerUrl,
       mode,
+      last_seen_price_at: Date.now(),
+      failed_sell_attempts: 0,
     };
     if (!ledger.blacklist.includes(mint)) ledger.blacklist.push(mint);
     livePrices.set(mint, fill);
@@ -1319,84 +1336,147 @@ async function executeSell(mode: ExecutionMode, mint: string, price: number, rea
     if (!pos) return false;
 
     const c = botConfig;
-    let fill = price * (1 - c.slippage_pct / 100);
+    const safePrice = Math.max(0, Number.isFinite(price) ? price : 0);
+    let fill = safePrice * (1 - c.slippage_pct / 100);
     let proceeds = pos.qty * fill * (1 - c.fee_pct / 100);
     let txHash: string | undefined;
     let explorerUrl: string | undefined;
+    let effectiveReason = reason;
+
+    const isEmergencyOrRugExit =
+      reason.startsWith('rug_') || reason.startsWith('stop_loss_') || reason.startsWith('max_hold');
+    const dropPct = pos.entry_price > 0 ? (safePrice / pos.entry_price - 1) * 100 : -100;
+
+    const shouldWriteOffDeadRug = (errMsg: string): boolean => {
+      pos.failed_sell_attempts = (pos.failed_sell_attempts || 0) + 1;
+      saveStateToDisk();
+      const lowErr = String(errMsg || '').toLowerCase();
+      const unroutable =
+        lowErr.includes('no route') ||
+        lowErr.includes('could not find any route') ||
+        lowErr.includes('route') ||
+        lowErr.includes('liquidity') ||
+        lowErr.includes('too small') ||
+        lowErr.includes('zero') ||
+        lowErr.includes('balance is 0') ||
+        lowErr.includes('not tradable');
+      const isDeadOrRugged = reason.startsWith('rug_') || dropPct <= -75 || safePrice <= 0;
+      return (unroutable && (isDeadOrRugged || pos.failed_sell_attempts >= 2)) || (isDeadOrRugged && pos.failed_sell_attempts >= 4);
+    };
+
+    const writeOffDeadPosition = (errMsg: string): boolean => {
+      fill = 0;
+      proceeds = 0;
+      effectiveReason = `${reason}_unsellable_writeoff`;
+      sniperLog(
+        `⚠ [RUG WRITE-OFF] ${pos.symbol} un-sellable (${errMsg}) — cleared slot at $0 so bot can continue trading.`,
+        'warn'
+      );
+      broadcastSse('execution_progress', {
+        action: 'SELL',
+        token: pos.symbol,
+        step: 'CONFIRMED',
+        detail: 'Rugpull slot cleared ($0 write-off)',
+      });
+      return true;
+    };
 
     if (mode === 'live') {
-      sniperLog(`⚡ [LIVE SELL START] ${pos.symbol} (${reason})...`, 'sell');
-      const solPriceUsd = await getSolPriceUsd();
-      let liveRes;
-      if (getTradingKeypair()) {
-        liveRes = await executeLiveSolanaSell({
-          tokenAddress: mint,
-          tokenSymbol: pos.symbol,
-          tokenQuantity: pos.qty,
-          tokenDecimals: pos.decimals || 6,
-          maxSlippageBps: Math.max(50, Math.round(c.slippage_pct * 100)),
-          priorityFeeLevel: 'high',
-          onStepProgress: (step, detail) => {
-            broadcastSse('execution_progress', { action: 'SELL', token: pos.symbol, step, detail });
-          },
-        });
+      if (safePrice <= 0 && reason === 'rug_no_price_auto_clear' && (pos.failed_sell_attempts || 0) >= 2) {
+        writeOffDeadPosition('token has no price/pool quote');
       } else {
-        const liveWallet = getLiveConnectedWallet(c.DEFAULT_CHAIN || 'solana');
-        if (!liveWallet?.address) {
-          sniperLog(`✗ [LIVE SELL FAILED] ${pos.symbol}: No connected Phantom wallet`, 'warn');
-          return false;
-        }
-        broadcastSse('execution_progress', { action: 'SELL', token: pos.symbol, step: 'PREPARING', detail: 'Fetching Jupiter exit quote...' });
-        const prep = await prepareLiveSellTransaction({
-          userPublicKey: liveWallet.address,
-          tokenAddress: mint,
-          tokenSymbol: pos.symbol,
-          tokenQuantity: pos.qty,
-          tokenDecimals: pos.decimals || 6,
-          maxSlippageBps: Math.max(50, Math.round(c.slippage_pct * 100)),
-          priorityFeeLevel: 'high',
-        });
-        if (!prep.success || !prep.base64Tx) {
-          sniperLog(`✗ [LIVE SELL FAILED] ${pos.symbol}: ${prep.error}`, 'warn');
-          broadcastSse('execution_progress', { action: 'SELL', token: pos.symbol, step: 'FAILED', error: prep.error });
-          return false;
-        }
-        broadcastSse('execution_progress', { action: 'SELL', token: pos.symbol, step: 'PHANTOM_CONFIRM', detail: 'Approve sell in Phantom popup...' });
-        const sigRes = await requestBrowserWalletSignature({
-          action: 'SELL',
-          symbol: pos.symbol,
-          mint,
-          base64Tx: prep.base64Tx,
-          userPublicKey: liveWallet.address,
-        });
-        if (!sigRes.signature) {
-          sniperLog(`✗ [LIVE SELL CANCELLED] ${pos.symbol}: ${sigRes.error}`, 'warn');
-          broadcastSse('execution_progress', { action: 'SELL', token: pos.symbol, step: 'FAILED', error: sigRes.error });
-          return false;
-        }
-        broadcastSse('execution_progress', { action: 'SELL', token: pos.symbol, step: 'CONFIRMING', detail: `Confirming ${sigRes.signature.slice(0, 8)}...` });
-        liveRes = await finalizeBrowserSignedTransaction({
-          signature: sigRes.signature,
-          targetMint: mint,
-          userPubkey: liveWallet.address,
-          isBuy: false,
-          estSolReceived: prep.estSolReceived,
-          tokenQuantity: pos.qty,
-          solPriceUsd,
-        });
-      }
+        sniperLog(`⚡ [LIVE SELL START] ${pos.symbol} (${reason})...`, 'sell');
+        const solPriceUsd = await getSolPriceUsd();
+        const exitSlippageBps = isEmergencyOrRugExit
+          ? Math.max(2500, Math.round(c.slippage_pct * 100))
+          : Math.max(50, Math.round(c.slippage_pct * 100));
+        let liveRes: any;
 
-      if (!liveRes.success) {
-        sniperLog(`✗ [LIVE SELL FAILED] ${pos.symbol}: ${liveRes.error}`, 'warn');
-        broadcastSse('execution_progress', { action: 'SELL', token: pos.symbol, step: 'FAILED', error: liveRes.error });
-        return false;
+        if (getTradingKeypair()) {
+          liveRes = await executeLiveSolanaSell({
+            tokenAddress: mint,
+            tokenSymbol: pos.symbol,
+            tokenQuantity: pos.qty,
+            tokenDecimals: pos.decimals || 6,
+            maxSlippageBps: exitSlippageBps,
+            priorityFeeLevel: 'high',
+            onStepProgress: (step, detail) => {
+              broadcastSse('execution_progress', { action: 'SELL', token: pos.symbol, step, detail });
+            },
+          });
+        } else {
+          const liveWallet = getLiveConnectedWallet(c.DEFAULT_CHAIN || 'solana');
+          if (!liveWallet?.address) {
+            sniperLog(`✗ [LIVE SELL FAILED] ${pos.symbol}: No connected Phantom wallet`, 'warn');
+            return false;
+          }
+          broadcastSse('execution_progress', { action: 'SELL', token: pos.symbol, step: 'PREPARING', detail: 'Fetching Jupiter exit quote...' });
+          const prep = await prepareLiveSellTransaction({
+            userPublicKey: liveWallet.address,
+            tokenAddress: mint,
+            tokenSymbol: pos.symbol,
+            tokenQuantity: pos.qty,
+            tokenDecimals: pos.decimals || 6,
+            maxSlippageBps: exitSlippageBps,
+            priorityFeeLevel: 'high',
+          });
+          if (!prep.success || !prep.base64Tx) {
+            const err = prep.error || 'No swap route';
+            if (shouldWriteOffDeadRug(err)) {
+              writeOffDeadPosition(err);
+              liveRes = { success: true, _writeOff: true };
+            } else {
+              sniperLog(`✗ [LIVE SELL FAILED] ${pos.symbol}: ${err}`, 'warn');
+              broadcastSse('execution_progress', { action: 'SELL', token: pos.symbol, step: 'FAILED', error: err });
+              return false;
+            }
+          } else {
+            broadcastSse('execution_progress', { action: 'SELL', token: pos.symbol, step: 'PHANTOM_CONFIRM', detail: 'Approve sell in Phantom popup...' });
+            const sigRes = await requestBrowserWalletSignature({
+              action: 'SELL',
+              symbol: pos.symbol,
+              mint,
+              base64Tx: prep.base64Tx,
+              userPublicKey: liveWallet.address,
+            });
+            if (!sigRes.signature) {
+              sniperLog(`✗ [LIVE SELL CANCELLED] ${pos.symbol}: ${sigRes.error}`, 'warn');
+              broadcastSse('execution_progress', { action: 'SELL', token: pos.symbol, step: 'FAILED', error: sigRes.error });
+              return false;
+            }
+            broadcastSse('execution_progress', { action: 'SELL', token: pos.symbol, step: 'CONFIRMING', detail: `Confirming ${sigRes.signature.slice(0, 8)}...` });
+            liveRes = await finalizeBrowserSignedTransaction({
+              signature: sigRes.signature,
+              targetMint: mint,
+              userPubkey: liveWallet.address,
+              isBuy: false,
+              estSolReceived: prep.estSolReceived,
+              tokenQuantity: pos.qty,
+              solPriceUsd,
+            });
+          }
+        }
+
+        if (!liveRes?._writeOff) {
+          if (!liveRes?.success) {
+            const err = liveRes?.error || 'Live swap failed';
+            if (shouldWriteOffDeadRug(err)) {
+              writeOffDeadPosition(err);
+            } else {
+              sniperLog(`✗ [LIVE SELL FAILED] ${pos.symbol}: ${err}`, 'warn');
+              broadcastSse('execution_progress', { action: 'SELL', token: pos.symbol, step: 'FAILED', error: err });
+              return false;
+            }
+          } else {
+            broadcastSse('execution_progress', { action: 'SELL', token: pos.symbol, step: 'CONFIRMED', detail: `Tx ${liveRes.signature?.slice(0, 8)}` });
+            const actualSol = liveRes.actualAmountOut || (proceeds / solPriceUsd);
+            proceeds = actualSol * solPriceUsd;
+            fill = liveRes.actualEffectivePriceUsd || (proceeds / pos.qty);
+            txHash = liveRes.signature;
+            explorerUrl = liveRes.explorerUrl;
+          }
+        }
       }
-      broadcastSse('execution_progress', { action: 'SELL', token: pos.symbol, step: 'CONFIRMED', detail: `Tx ${liveRes.signature?.slice(0, 8)}` });
-      const actualSol = liveRes.actualAmountOut || (proceeds / solPriceUsd);
-      proceeds = actualSol * solPriceUsd;
-      fill = liveRes.actualEffectivePriceUsd || (proceeds / pos.qty);
-      txHash = liveRes.signature;
-      explorerUrl = liveRes.explorerUrl;
     } else {
       ledger.cash += proceeds;
     }
@@ -1422,7 +1502,7 @@ async function executeSell(mode: ExecutionMode, mint: string, price: number, rea
       usd: proceeds,
       pnl_usd: Math.round(pnl * 10000) / 10000,
       pnl_pct: Math.round(pnlPct * 100) / 100,
-      reason,
+      reason: effectiveReason,
       dexscreener: pos.url || `https://dexscreener.com/solana/${mint}`,
       dex: pos.dex,
       source: pos.source,
@@ -1434,7 +1514,7 @@ async function executeSell(mode: ExecutionMode, mint: string, price: number, rea
     appendTradeCsv(tradeRow);
 
     sniperLog(
-      `✗ SELL ${pos.symbol} @ $${fmtPrice(fill)} pnl $${pnl.toFixed(2)} (${pnlPct.toFixed(1)}%) [${reason}]${txHash ? ` (tx: ${txHash.slice(0, 8)}...)` : ''}`,
+      `✗ SELL ${pos.symbol} @ $${fmtPrice(fill)} pnl $${pnl.toFixed(2)} (${pnlPct.toFixed(1)}%) [${effectiveReason}]${txHash ? ` (tx: ${txHash.slice(0, 8)}...)` : ''}`,
       'sell'
     );
     saveStateToDisk();
@@ -1445,30 +1525,67 @@ async function executeSell(mode: ExecutionMode, mint: string, price: number, rea
   }
 }
 
-async function checkExits(mode: ExecutionMode, prices: Map<string, number>): Promise<number> {
+async function checkExits(
+  mode: ExecutionMode,
+  prices: Map<string, number>,
+  liquidities: Map<string, number> = new Map()
+): Promise<number> {
   const ledger = ledgers[mode];
   const cfg = botConfig;
   const tp = cfg.take_profit_pct ?? 50;
   const trail = cfg.trailing_stop_pct ?? 0;
+  const sl = cfg.stop_loss_pct ?? 35;
+  const rugDrop = cfg.rug_exit_drop_pct ?? 85;
+  const maxHoldMin = cfg.max_hold_minutes ?? 120;
   let exits = 0;
 
   for (const [mint, pos] of Object.entries(ledger.positions)) {
     const price = prices.get(mint);
-    if (price === undefined || price === null) continue;
+    const heldMin = (Date.now() - pos.opened) / 60000;
+    const lastSeen = pos.last_seen_price_at || pos.opened;
+    const staleMin = (Date.now() - lastSeen) / 60000;
+    const liq = liquidities.get(mint) ?? pos.last_liquidity_usd;
+
+    if (price === undefined || price === null) {
+      let staleReason: string | null = null;
+      if (heldMin >= maxHoldMin) {
+        staleReason = 'max_hold_no_price';
+      } else if (rugDrop > 0 && staleMin >= 3) {
+        staleReason = 'rug_no_price_auto_clear';
+      }
+      if (staleReason) {
+        const exitPx = staleMin >= 2 ? 0 : (livePrices.get(mint) ?? 0);
+        const ok = await executeSell(mode, mint, exitPx, staleReason);
+        if (ok) exits += 1;
+      }
+      continue;
+    }
+
+    if (price > 0) {
+      pos.last_seen_price_at = Date.now();
+    }
 
     const entry = pos.entry_price;
     pos.peak_price = Math.max(pos.peak_price || entry, price);
     pos.low_price = Math.min(pos.low_price || entry, price);
 
-    const change = (price / entry - 1) * 100;
-    const peakChg = (pos.peak_price / entry - 1) * 100;
+    const change = price <= 0 || entry <= 0 ? -100 : (price / entry - 1) * 100;
+    const peakChg = entry > 0 ? (pos.peak_price / entry - 1) * 100 : 0;
     let reason: string | null = null;
 
-    if (tp > 0 && change >= tp) {
+    if (price <= 0) {
+      reason = 'rug_zero_price';
+    } else if (tp > 0 && change >= tp) {
       reason = `take_profit_${tp}`;
     } else if (trail > 0 && peakChg >= 10 && (pos.peak_price / price - 1) * 100 >= trail) {
       reason = `trailing_stop_${trail}`;
-    } else if ((Date.now() - pos.opened) / 60000 >= (cfg.max_hold_minutes ?? 120)) {
+    } else if (rugDrop > 0 && change <= -rugDrop) {
+      reason = `rug_drop_${rugDrop}`;
+    } else if (sl > 0 && change <= -sl) {
+      reason = `stop_loss_${sl}`;
+    } else if (rugDrop > 0 && liq !== undefined && liq < 50 && change <= -35) {
+      reason = 'rug_liquidity_pulled';
+    } else if (heldMin >= maxHoldMin) {
       reason = 'max_hold';
     }
 
@@ -1614,14 +1731,29 @@ async function monitorPositions() {
   if (mints.length === 0) return;
 
   const prices = await fetchJupiterPrices(mints, botConfig);
-  const missing = mints.filter((m) => !prices.has(m));
-  for (let i = 0; i < missing.length; i += 30) {
-    const chunk = missing.slice(i, i + 30);
+  const liquidities = new Map<string, number>();
+
+  const needDex = mints.filter((m) => {
+    const px = prices.get(m);
+    if (px === undefined || px <= 0) return true;
+    const pos = ledger.positions[m];
+    return pos && pos.entry_price > 0 && (px / pos.entry_price - 1) * 100 <= -40;
+  });
+
+  for (let i = 0; i < needDex.length; i += 30) {
+    const chunk = needDex.slice(i, i + 30);
     const data = await getJson(`${DEX}/tokens/v1/solana/${chunk.join(',')}`, undefined, 4000);
     if (Array.isArray(data)) {
       for (const p of data) {
         const mint = p?.baseToken?.address;
-        if (mint && ledger.positions[mint] && !prices.has(mint)) {
+        if (!mint || !ledger.positions[mint]) continue;
+        const liq = _f(p?.liquidity?.usd);
+        if (liq !== null) {
+          const prev = liquidities.get(mint) ?? 0;
+          if (liq > prev) liquidities.set(mint, liq);
+          ledger.positions[mint].last_liquidity_usd = Math.max(prev, liq);
+        }
+        if (!prices.has(mint)) {
           const px = _f(p?.priceUsd);
           if (px !== null) prices.set(mint, px);
         }
@@ -1637,7 +1769,7 @@ async function monitorPositions() {
     botStatus.last_price_time = lastPriceTime;
   }
 
-  await checkExits(mode, prices);
+  await checkExits(mode, prices, liquidities);
 }
 
 export async function runProbeDiagnostic(): Promise<string[]> {
@@ -1777,7 +1909,7 @@ function startBotEngine() {
     'STATE_CHANGE'
   );
   sniperLog(
-    `Window: coins < ${(botConfig.max_age_minutes * 60).toFixed(0)}s old (grace <${botConfig.ultra_early_grace_sec}s skips liquidity/buy floors) | TP ${botConfig.take_profit_pct}% | Trail ${botConfig.trailing_stop_pct}% | liq>=$${botConfig.min_liquidity_usd.toFixed(0)} after grace | rug check ${botConfig.use_rugcheck ? 'ON' : 'OFF'}`,
+    `Window: coins < ${(botConfig.max_age_minutes * 60).toFixed(0)}s old (grace <${botConfig.ultra_early_grace_sec}s skips liquidity/buy floors) | TP ${botConfig.take_profit_pct}% | SL ${botConfig.stop_loss_pct}% | RugExit ${botConfig.rug_exit_drop_pct}% | Trail ${botConfig.trailing_stop_pct}% | liq>=$${botConfig.min_liquidity_usd.toFixed(0)} after grace | rug check ${botConfig.use_rugcheck ? 'ON' : 'OFF'}`,
     'info',
     'STATE_CHANGE'
   );
@@ -1946,15 +2078,14 @@ async function startServer() {
       const ds = await getJson(`${DEX}/tokens/v1/solana/${mint}`, undefined, 4000);
       if (Array.isArray(ds) && ds[0]?.priceUsd) price = _f(ds[0].priceUsd) ?? undefined;
     }
-    if (!price) {
-      return res.status(400).json({ error: 'No live price for this coin yet.' });
-    }
+    const reason = !price || price <= 0 ? 'manual_no_price_writeoff' : 'manual';
+    const finalPrice = !price || price <= 0 ? 0 : price;
 
-    const ok = await executeSell(mode, mint, price, 'manual');
+    const ok = await executeSell(mode, mint, finalPrice, reason);
     if (!ok) {
       return res.status(500).json({ error: 'Failed to close position.' });
     }
-    res.json({ success: true, message: mode === 'live' ? 'Sold (live).' : 'Sold (paper trade).' });
+    res.json({ success: true, message: mode === 'live' ? 'Sold / cleared (live).' : 'Sold / cleared (paper trade).' });
   });
 
   app.post('/api/positions/sell-all', async (_req, res) => {
@@ -1968,11 +2099,18 @@ async function startServer() {
         const fresh = await fetchJupiterPrices([mint], botConfig);
         price = fresh.get(mint);
       }
-      if (!price) price = ledger.positions[mint]?.entry_price;
-      if (price) {
-        const ok = await executeSell(mode, mint, price, 'manual_sell_all');
-        if (ok) sold += 1;
+      if (!price) {
+        const ds = await getJson(`${DEX}/tokens/v1/solana/${mint}`, undefined, 3000);
+        if (Array.isArray(ds) && ds[0]?.priceUsd) price = _f(ds[0].priceUsd) ?? undefined;
       }
+      const hasPrice = price !== undefined && price !== null && price > 0;
+      const ok = await executeSell(
+        mode,
+        mint,
+        hasPrice ? price! : 0,
+        hasPrice ? 'manual_sell_all' : 'manual_sell_all_no_price'
+      );
+      if (ok) sold += 1;
     }
     res.json({ success: true, sold_count: sold });
   });
