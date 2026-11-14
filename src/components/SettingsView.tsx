@@ -1,18 +1,20 @@
 import React, { useEffect, useState } from 'react';
-import { CheckCircle2, AlertTriangle, RotateCcw, Save, X } from 'lucide-react';
+import { CheckCircle2, AlertTriangle, RotateCcw, Save, X, ArrowLeftRight } from 'lucide-react';
 import { useBot } from '../context/BotContext';
 
 interface SettingField {
   key: string;
+  usdKey?: string;
+  solKey?: string;
   label: string;
-  kind: 'float' | 'int' | 'bool' | 'string';
+  kind: 'float' | 'int' | 'bool' | 'string' | 'dual_sol_usd';
 }
 
 const SETTING_FIELDS: SettingField[] = [
-  { key: 'start_balance_usd', label: 'Start balance $ (used on reset)', kind: 'float' },
-  { key: 'trade_size_usd', label: 'Trade size $', kind: 'float' },
+  { key: 'start_balance', solKey: 'start_balance_sol', usdKey: 'start_balance_usd', label: 'Start balance (used on reset)', kind: 'dual_sol_usd' },
+  { key: 'trade_size', solKey: 'trade_size_sol', usdKey: 'trade_size_usd', label: 'Trade size per coin', kind: 'dual_sol_usd' },
   { key: 'max_open_positions', label: 'Max open positions', kind: 'int' },
-  { key: 'daily_loss_limit_usd', label: 'Daily loss limit $', kind: 'float' },
+  { key: 'daily_loss_limit', solKey: 'daily_loss_limit_sol', usdKey: 'daily_loss_limit_usd', label: 'Daily loss limit (0 = off)', kind: 'dual_sol_usd' },
   { key: 'take_profit_pct', label: 'Take profit % (0 = off)', kind: 'float' },
   { key: 'trailing_stop_pct', label: 'Trailing stop % from peak (0 = off)', kind: 'float' },
   { key: 'stop_loss_pct', label: 'Stop loss % below entry (0 = off)', kind: 'float' },
@@ -45,10 +47,13 @@ const SETTING_FIELDS: SettingField[] = [
 ];
 
 const LIMITS: Record<string, [number, number]> = {
-  start_balance_usd: [1, 1e7],
-  trade_size_usd: [0.5, 1e6],
+  start_balance_usd: [0.01, 1e7],
+  start_balance_sol: [0.0001, 1e6],
+  trade_size_usd: [0.01, 1e6],
+  trade_size_sol: [0.0001, 1e5],
   max_open_positions: [1, 50],
   daily_loss_limit_usd: [0, 1e7],
+  daily_loss_limit_sol: [0, 1e6],
   take_profit_pct: [0, 1e5],
   trailing_stop_pct: [0, 1000],
   stop_loss_pct: [0, 99.9],
@@ -71,8 +76,21 @@ const LIMITS: Record<string, [number, number]> = {
   fee_pct: [0, 50],
 };
 
+function fmtUsdInput(n: number): string {
+  if (!isFinite(n) || n <= 0) return '0';
+  return n < 1 ? n.toFixed(3).replace(/0+$/, '').replace(/\.$/, '') : n.toFixed(2);
+}
+
+function fmtSolInput(n: number): string {
+  if (!isFinite(n) || n <= 0) return '0';
+  const d = n < 0.01 ? 5 : 4;
+  return n.toFixed(d).replace(/0+$/, '').replace(/\.$/, '');
+}
+
 export const SettingsView: React.FC = () => {
-  const { config, isBotStopped, handleSaveConfig, handleResetAccount, say } = useBot();
+  const { config, portfolio, status, isBotStopped, handleSaveConfig, handleResetAccount, say } = useBot();
+
+  const solPriceUsd = Number(status?.sol_price_usd || portfolio?.sol_price_usd || 145);
 
   const [values, setValues] = useState<Record<string, any>>({});
   const [errors, setErrors] = useState<string[]>([]);
@@ -83,11 +101,32 @@ export const SettingsView: React.FC = () => {
   useEffect(() => {
     const next: Record<string, any> = {};
     for (const f of SETTING_FIELDS) {
-      const v = config[f.key];
-      next[f.key] = f.kind === 'bool' ? Boolean(v) : v !== undefined && v !== null ? String(v) : '';
+      if (f.kind === 'dual_sol_usd' && f.solKey && f.usdKey) {
+        const usdVal = config[f.usdKey];
+        const solVal = config[f.solKey];
+        next[f.solKey] =
+          solVal !== undefined && solVal !== null
+            ? String(solVal)
+            : usdVal !== undefined && usdVal !== null
+            ? fmtSolInput(Number(usdVal) / solPriceUsd)
+            : '';
+        next[f.usdKey] =
+          usdVal !== undefined && usdVal !== null
+            ? String(usdVal)
+            : solVal !== undefined && solVal !== null
+            ? fmtUsdInput(Number(solVal) * solPriceUsd)
+            : '';
+      } else {
+        const v = config[f.key];
+        next[f.key] = f.kind === 'bool' ? Boolean(v) : v !== undefined && v !== null ? String(v) : '';
+      }
     }
+    next.sizing_basis = config.sizing_basis === 'usd' ? 'usd' : 'sol';
     next.jupiter_api_key = config.jupiter_api_key || '';
-    next.MAX_POSITION_SIZE_USD = String(config.MAX_POSITION_SIZE_USD ?? 100);
+    const maxUsd = Number(config.MAX_POSITION_SIZE_USD ?? 100);
+    const maxSol = Number(config.MAX_POSITION_SIZE_SOL ?? Number((maxUsd / solPriceUsd).toFixed(4)));
+    next.MAX_POSITION_SIZE_USD = String(maxUsd);
+    next.MAX_POSITION_SIZE_SOL = String(maxSol);
     next.MIN_GAS_RESERVE_SOL = String(config.MIN_GAS_RESERVE_SOL ?? 0.01);
     next.PRIORITY_FEE_LEVEL = config.PRIORITY_FEE_LEVEL || 'standard';
     setValues(next);
@@ -97,15 +136,60 @@ export const SettingsView: React.FC = () => {
     setValues((prev) => ({ ...prev, [key]: val }));
   };
 
+  const handleDualChange = (
+    changedSide: 'sol' | 'usd',
+    solKey: string,
+    usdKey: string,
+    rawVal: string
+  ) => {
+    setValues((prev) => {
+      const next: Record<string, any> = {
+        ...prev,
+        sizing_basis: changedSide,
+        [changedSide === 'sol' ? solKey : usdKey]: rawVal,
+      };
+      const num = Number(rawVal);
+      if (rawVal !== '' && !isNaN(num) && isFinite(num) && num >= 0 && solPriceUsd > 0) {
+        if (changedSide === 'sol') {
+          next[usdKey] = fmtUsdInput(num * solPriceUsd);
+        } else {
+          next[solKey] = fmtSolInput(num / solPriceUsd);
+        }
+      }
+      return next;
+    });
+  };
+
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setErrors([]);
     setSavedBanner(null);
 
     const errs: string[] = [];
-    const payload: Record<string, any> = {};
+    const payload: Record<string, any> = {
+      sizing_basis: values.sizing_basis === 'usd' ? 'usd' : 'sol',
+    };
 
     for (const f of SETTING_FIELDS) {
+      if (f.kind === 'dual_sol_usd' && f.solKey && f.usdKey) {
+        for (const subKey of [f.solKey, f.usdKey]) {
+          const unit = subKey.endsWith('_sol') ? 'SOL' : '$';
+          const rawVal = values[subKey];
+          const num = Number(rawVal);
+          if (rawVal === '' || rawVal === undefined || isNaN(num)) {
+            errs.push(`${f.label} (${unit}): not a valid number`);
+            continue;
+          }
+          const bounds = LIMITS[subKey];
+          if (bounds && (num < bounds[0] || num > bounds[1])) {
+            errs.push(`${f.label} (${unit}): must be between ${bounds[0]} and ${bounds[1]}`);
+            continue;
+          }
+          payload[subKey] = num;
+        }
+        continue;
+      }
+
       const rawVal = values[f.key];
       if (f.kind === 'bool') {
         payload[f.key] = Boolean(rawVal);
@@ -127,6 +211,8 @@ export const SettingsView: React.FC = () => {
 
     const maxPosUsd = Number(values.MAX_POSITION_SIZE_USD);
     if (!isNaN(maxPosUsd) && maxPosUsd > 0) payload.MAX_POSITION_SIZE_USD = maxPosUsd;
+    const maxPosSol = Number(values.MAX_POSITION_SIZE_SOL);
+    if (!isNaN(maxPosSol) && maxPosSol > 0) payload.MAX_POSITION_SIZE_SOL = maxPosSol;
     const minGasSol = Number(values.MIN_GAS_RESERVE_SOL);
     if (!isNaN(minGasSol) && minGasSol >= 0) payload.MIN_GAS_RESERVE_SOL = minGasSol;
     payload.PRIORITY_FEE_LEVEL = values.PRIORITY_FEE_LEVEL || 'standard';
@@ -144,7 +230,7 @@ export const SettingsView: React.FC = () => {
     try {
       const res = await handleSaveConfig(payload);
       if (res.success) {
-        setSavedBanner('Settings applied and saved.');
+        setSavedBanner('Settings applied and saved (SOL & $ synced).');
         say('Settings applied and saved.', 'success');
       } else if (res.error) {
         setErrors(res.error.split('\n'));
@@ -174,6 +260,44 @@ export const SettingsView: React.FC = () => {
   const rightFields = SETTING_FIELDS.slice(half);
 
   const renderField = (field: SettingField) => {
+    if (field.kind === 'dual_sol_usd' && field.solKey && field.usdKey) {
+      return (
+        <div
+          key={field.key}
+          className="flex flex-wrap items-center justify-between gap-2 py-1.5 border-b border-[var(--border)]/60 last:border-b-0"
+        >
+          <label htmlFor={`setting-${field.solKey}`} className="text-xs text-[var(--text)] leading-snug">
+            {field.label}
+          </label>
+          <div className="flex items-center gap-1.5 shrink-0">
+            <div className="flex items-center bg-[var(--panel)] border border-[var(--border-bright)] rounded focus-within:border-[var(--teal)]">
+              <input
+                id={`setting-${field.solKey}`}
+                type="text"
+                inputMode="decimal"
+                value={values[field.solKey] ?? ''}
+                onChange={(e) => handleDualChange('sol', field.solKey!, field.usdKey!, e.target.value)}
+                className="w-20 bg-transparent px-2 py-1 text-xs font-mono text-right text-[var(--text)] focus:outline-none tabular-nums"
+              />
+              <span className="pr-2 text-[10px] font-bold text-[var(--teal)] select-none">SOL</span>
+            </div>
+            <ArrowLeftRight size={11} className="text-[var(--dim)] shrink-0" />
+            <div className="flex items-center bg-[var(--panel)] border border-[var(--border-bright)] rounded focus-within:border-[var(--teal)]">
+              <span className="pl-2 text-[10px] font-bold text-[var(--muted)] select-none">$</span>
+              <input
+                id={`setting-${field.usdKey}`}
+                type="text"
+                inputMode="decimal"
+                value={values[field.usdKey] ?? ''}
+                onChange={(e) => handleDualChange('usd', field.solKey!, field.usdKey!, e.target.value)}
+                className="w-20 bg-transparent px-2 py-1 text-xs font-mono text-right text-[var(--text)] focus:outline-none tabular-nums"
+              />
+            </div>
+          </div>
+        </div>
+      );
+    }
+
     const val = values[field.key];
     return (
       <div
@@ -204,6 +328,9 @@ export const SettingsView: React.FC = () => {
       </div>
     );
   };
+
+  const gasReserveNum = Number(values.MIN_GAS_RESERVE_SOL || 0);
+  const gasReserveUsd = !isNaN(gasReserveNum) ? gasReserveNum * solPriceUsd : 0;
 
   return (
     <form
@@ -259,6 +386,41 @@ export const SettingsView: React.FC = () => {
         </div>
       )}
 
+      {/* Side-by-Side SOL / $ Rate & Basis Strip */}
+      <div className="px-4 py-2 rounded-lg bg-[var(--card)] border border-[var(--border)] flex flex-wrap items-center justify-between gap-2 text-xs">
+        <div className="flex items-center gap-2 text-[var(--muted)]">
+          <ArrowLeftRight size={13} className="text-[var(--teal)]" />
+          <span>
+            Live reference: <strong className="font-mono text-[var(--text)]">1 SOL = ${solPriceUsd.toFixed(2)}</strong> — edit either SOL or $ and both stay synced.
+          </span>
+        </div>
+        <div className="flex items-center gap-1.5 font-mono text-[11px]">
+          <span className="text-[var(--dim)]">Live trade basis:</span>
+          <button
+            type="button"
+            onClick={() => handleFieldChange('sizing_basis', 'sol')}
+            className={`px-2 py-0.5 rounded border cursor-pointer font-semibold ${
+              values.sizing_basis !== 'usd'
+                ? 'bg-[var(--teal)]/20 border-[var(--teal)] text-[var(--teal)]'
+                : 'bg-[var(--panel)] border-[var(--border)] text-[var(--muted)]'
+            }`}
+          >
+            SOL exact
+          </button>
+          <button
+            type="button"
+            onClick={() => handleFieldChange('sizing_basis', 'usd')}
+            className={`px-2 py-0.5 rounded border cursor-pointer font-semibold ${
+              values.sizing_basis === 'usd'
+                ? 'bg-[var(--teal)]/20 border-[var(--teal)] text-[var(--teal)]'
+                : 'bg-[var(--panel)] border-[var(--border)] text-[var(--muted)]'
+            }`}
+          >
+            USD exact
+          </button>
+        </div>
+      </div>
+
       {/* Two-Column Settings Grid matching gui.py */}
       <div className="bg-[var(--card)] border border-[var(--border)] rounded-lg p-5">
         <div className="grid grid-cols-1 lg:grid-cols-2 gap-x-10 gap-y-1">
@@ -283,28 +445,51 @@ export const SettingsView: React.FC = () => {
 
           <div>
             <label className="block text-[11px] font-medium text-[var(--dim)] mb-1">
-              Live max position size ($)
+              Live max position size (SOL ⇄ $)
             </label>
-            <input
-              type="text"
-              inputMode="decimal"
-              value={values.MAX_POSITION_SIZE_USD ?? '100'}
-              onChange={(e) => handleFieldChange('MAX_POSITION_SIZE_USD', e.target.value)}
-              className="w-full bg-[var(--panel)] border border-[var(--border-bright)] rounded px-2.5 py-1.5 text-xs font-mono text-[var(--text)] focus:outline-none focus:border-[var(--teal)] tabular-nums"
-            />
+            <div className="flex items-center gap-1.5">
+              <div className="flex-1 flex items-center bg-[var(--panel)] border border-[var(--border-bright)] rounded focus-within:border-[var(--teal)]">
+                <input
+                  type="text"
+                  inputMode="decimal"
+                  value={values.MAX_POSITION_SIZE_SOL ?? '0.7'}
+                  onChange={(e) => handleDualChange('sol', 'MAX_POSITION_SIZE_SOL', 'MAX_POSITION_SIZE_USD', e.target.value)}
+                  className="w-full bg-transparent px-2 py-1.5 text-xs font-mono text-right text-[var(--text)] focus:outline-none tabular-nums"
+                />
+                <span className="pr-2 text-[10px] font-bold text-[var(--teal)] select-none">SOL</span>
+              </div>
+              <div className="flex-1 flex items-center bg-[var(--panel)] border border-[var(--border-bright)] rounded focus-within:border-[var(--teal)]">
+                <span className="pl-2 text-[10px] font-bold text-[var(--muted)] select-none">$</span>
+                <input
+                  type="text"
+                  inputMode="decimal"
+                  value={values.MAX_POSITION_SIZE_USD ?? '100'}
+                  onChange={(e) => handleDualChange('usd', 'MAX_POSITION_SIZE_SOL', 'MAX_POSITION_SIZE_USD', e.target.value)}
+                  className="w-full bg-transparent px-2 py-1.5 text-xs font-mono text-right text-[var(--text)] focus:outline-none tabular-nums"
+                />
+              </div>
+            </div>
           </div>
 
           <div>
             <label className="block text-[11px] font-medium text-[var(--dim)] mb-1">
-              Live min gas reserve (SOL)
+              Live min gas reserve (SOL · ~${gasReserveUsd.toFixed(2)})
             </label>
-            <input
-              type="text"
-              inputMode="decimal"
-              value={values.MIN_GAS_RESERVE_SOL ?? '0.01'}
-              onChange={(e) => handleFieldChange('MIN_GAS_RESERVE_SOL', e.target.value)}
-              className="w-full bg-[var(--panel)] border border-[var(--border-bright)] rounded px-2.5 py-1.5 text-xs font-mono text-[var(--text)] focus:outline-none focus:border-[var(--teal)] tabular-nums"
-            />
+            <div className="flex items-center gap-1.5">
+              <div className="flex-1 flex items-center bg-[var(--panel)] border border-[var(--border-bright)] rounded focus-within:border-[var(--teal)]">
+                <input
+                  type="text"
+                  inputMode="decimal"
+                  value={values.MIN_GAS_RESERVE_SOL ?? '0.01'}
+                  onChange={(e) => handleFieldChange('MIN_GAS_RESERVE_SOL', e.target.value)}
+                  className="w-full bg-transparent px-2.5 py-1.5 text-xs font-mono text-right text-[var(--text)] focus:outline-none tabular-nums"
+                />
+                <span className="pr-2.5 text-[10px] font-bold text-[var(--teal)] select-none">SOL</span>
+              </div>
+              <span className="px-2 py-1.5 rounded bg-[var(--panel)]/60 border border-[var(--border)] text-[11px] font-mono text-[var(--muted)] tabular-nums shrink-0">
+                ~${gasReserveUsd.toFixed(2)}
+              </span>
+            </div>
           </div>
 
           <div>

@@ -11,8 +11,11 @@ export interface PositionRow {
   now: number | null;
   chg: number | null;
   pnl_usd: number | null;
+  pnl_sol?: number | null;
   value: number | null;
+  value_sol?: number | null;
   cost: number;
+  cost_sol?: number;
   peak: number;
   low: number;
   held: number;
@@ -34,7 +37,9 @@ export interface SniperTradeRow {
   mint: string;
   price: number;
   usd: number;
+  sol_amount?: number;
   pnl_usd: number | null;
+  pnl_sol?: number | null;
   pnl_pct: number | null;
   reason: string;
   dexscreener: string;
@@ -58,11 +63,17 @@ export interface SniperLog {
 
 export interface PortfolioStats {
   mode: ExecutionMode;
+  sol_price_usd?: number;
   cash: number;
+  cash_sol?: number;
   value: number;
+  value_sol?: number;
   open_pnl: number;
+  open_pnl_sol?: number;
   day_pnl: number;
+  day_pnl_sol?: number;
   total_pnl: number;
+  total_pnl_sol?: number;
   closed: number;
   wins: number;
   win_rate_pct: number;
@@ -175,11 +186,17 @@ function mapHashToTab(raw: string): SniperTabId | null {
 
 const DEFAULT_PORTFOLIO: PortfolioStats = {
   mode: 'paper',
+  sol_price_usd: 145,
   cash: 50,
+  cash_sol: 0.3448,
   value: 50,
+  value_sol: 0.3448,
   open_pnl: 0,
+  open_pnl_sol: 0,
   day_pnl: 0,
+  day_pnl_sol: 0,
   total_pnl: 0,
+  total_pnl_sol: 0,
   closed: 0,
   wins: 0,
   win_rate_pct: 0,
@@ -190,9 +207,13 @@ const DEFAULT_PORTFOLIO: PortfolioStats = {
 
 const DEFAULT_CLIENT_CONFIG = {
   start_balance_usd: 50.0,
+  start_balance_sol: 0.35,
   trade_size_usd: 5.0,
+  trade_size_sol: 0.035,
   max_open_positions: 3,
   daily_loss_limit_usd: 10.0,
+  daily_loss_limit_sol: 0.07,
+  sizing_basis: 'sol',
   take_profit_pct: 50.0,
   trailing_stop_pct: 0.0,
   stop_loss_pct: 35.0,
@@ -226,6 +247,7 @@ const DEFAULT_CLIENT_CONFIG = {
   EXECUTION_MODE: 'paper' as ExecutionMode,
   DEFAULT_CHAIN: 'solana',
   MAX_POSITION_SIZE_USD: 100.0,
+  MAX_POSITION_SIZE_SOL: 0.7,
   MIN_GAS_RESERVE_SOL: 0.01,
   PRIORITY_FEE_LEVEL: 'standard',
   THEME: 'dark',

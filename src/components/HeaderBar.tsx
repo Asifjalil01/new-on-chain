@@ -153,6 +153,7 @@ export const HeaderBar: React.FC = () => {
           {connectedLiveBalanceSol !== null && (
             <span className="font-mono text-[var(--muted)] border-l border-[var(--border)] pl-2 tabular-nums">
               {connectedLiveBalanceSol.toFixed(4)} {connectedLiveSymbol}
+              {status?.sol_price_usd ? ` ($${(connectedLiveBalanceSol * Number(status.sol_price_usd)).toFixed(2)})` : ''}
             </span>
           )}
         </button>

@@ -74,8 +74,8 @@ export const HistoryView: React.FC<HistoryViewProps> = ({ trades: propTrades }) 
                   <th className="py-2.5 px-3">Action</th>
                   <th className="py-2.5 px-3">Coin</th>
                   <th className="py-2.5 px-3 text-right">Price</th>
-                  <th className="py-2.5 px-3 text-right">Amount</th>
-                  <th className="py-2.5 px-3 text-right">PnL $</th>
+                  <th className="py-2.5 px-3 text-right">Amount (SOL / $)</th>
+                  <th className="py-2.5 px-3 text-right">PnL (SOL / $)</th>
                   <th className="py-2.5 px-3 text-right">PnL %</th>
                   <th className="py-2.5 px-3">Exit reason</th>
                   <th className="py-2.5 px-3">Coin key</th>
@@ -115,9 +115,13 @@ export const HistoryView: React.FC<HistoryViewProps> = ({ trades: propTrades }) 
                         {fmtPrice(t.price)}
                       </td>
                       <td className="py-2 px-3 text-right text-[var(--text)] whitespace-nowrap">
-                        {fmtMoney(t.usd)}
+                        {t.sol_amount !== undefined ? `${t.sol_amount.toFixed(4)} SOL · ` : ''}
+                        <span className="text-[var(--muted)]">{fmtMoney(t.usd)}</span>
                       </td>
                       <td className={`py-2 px-3 text-right whitespace-nowrap ${toneClass}`}>
+                        {t.pnl_sol !== undefined && t.pnl_sol !== null
+                          ? `${t.pnl_sol >= 0 ? '+' : ''}${t.pnl_sol.toFixed(4)} SOL · `
+                          : ''}
                         {pnl !== null && pnl !== undefined ? fmtMoney(pnl, true) : ''}
                       </td>
                       <td className={`py-2 px-3 text-right whitespace-nowrap ${toneClass}`}>

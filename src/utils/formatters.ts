@@ -24,6 +24,29 @@ export function fmtMoney(x: number | undefined | null, sign = false): string {
 }
 
 /**
+ * Formats SOL amounts cleanly with dynamic precision for tiny values (e.g. 0.00467 SOL).
+ */
+export function fmtSol(x: number | undefined | null, sign = false, decimals?: number): string {
+  if (x === undefined || x === null || isNaN(x)) return '...';
+  const n = Number(x);
+  const abs = Math.abs(n);
+  const dec =
+    decimals !== undefined
+      ? decimals
+      : abs > 0 && abs < 0.01
+      ? 5
+      : abs < 1
+      ? 4
+      : 3;
+  const formatted = `${abs.toLocaleString('en-US', {
+    minimumFractionDigits: Math.min(dec, 4),
+    maximumFractionDigits: dec,
+  })} SOL`;
+  if (sign) return `${n >= 0 ? '+' : '-'}${formatted}`;
+  return `${n < 0 ? '-' : ''}${formatted}`;
+}
+
+/**
  * Exact percentage formatter matching gui.py (`pct(x)`).
  */
 export function fmtPct(x: number | undefined | null): string {

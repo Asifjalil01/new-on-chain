@@ -8,7 +8,7 @@ import { SettingsView } from './components/SettingsView';
 import { WalletsView } from './components/WalletsView';
 import { WalletConnectModal } from './components/WalletConnectModal';
 import { LiveConfirmModal } from './components/LiveConfirmModal';
-import { fmtMoney } from './utils/formatters';
+import { fmtMoney, fmtSol } from './utils/formatters';
 
 function BotAppContent() {
   const {
@@ -16,6 +16,7 @@ function BotAppContent() {
     navigateToTab,
     positions,
     portfolio,
+    status,
     config,
     toastMessage,
     executionProgress,
@@ -24,41 +25,64 @@ function BotAppContent() {
     selectActiveWallet,
   } = useBot();
 
+  const solPrice = Number(status?.sol_price_usd || portfolio?.sol_price_usd || 145);
+  const cashSol = portfolio.cash_sol ?? (solPrice > 0 ? portfolio.cash / solPrice : 0);
+  const valueSol = portfolio.value_sol ?? (solPrice > 0 ? portfolio.value / solPrice : 0);
+  const openPnlSol = portfolio.open_pnl_sol ?? (solPrice > 0 ? portfolio.open_pnl / solPrice : 0);
+  const dayPnlSol = portfolio.day_pnl_sol ?? (solPrice > 0 ? portfolio.day_pnl / solPrice : 0);
+  const totalPnlSol = portfolio.total_pnl_sol ?? (solPrice > 0 ? portfolio.total_pnl / solPrice : 0);
+  const isLiveMode = config.EXECUTION_MODE === 'live';
+
+  const tradeSizeSol =
+    config.sizing_basis === 'sol' && Number(config.trade_size_sol) > 0
+      ? Number(config.trade_size_sol)
+      : Number(config.trade_size_usd || 5) / solPrice;
+  const tradeSizeUsd =
+    config.sizing_basis === 'sol' && Number(config.trade_size_sol) > 0
+      ? Number(config.trade_size_sol) * solPrice
+      : Number(config.trade_size_usd || 5);
+
   const kpiCards = [
     {
       key: 'cash',
-      label: config.EXECUTION_MODE === 'live' ? 'Wallet cash' : 'Cash',
-      value: fmtMoney(portfolio.cash),
+      label: isLiveMode ? 'Wallet cash' : 'Cash',
+      value: isLiveMode ? fmtSol(cashSol) : fmtMoney(portfolio.cash),
+      sub: isLiveMode ? fmtMoney(portfolio.cash) : fmtSol(cashSol),
       tone: 'neutral' as const,
     },
     {
       key: 'value',
       label: 'Est. total value',
-      value: fmtMoney(portfolio.value),
+      value: isLiveMode ? fmtSol(valueSol) : fmtMoney(portfolio.value),
+      sub: isLiveMode ? fmtMoney(portfolio.value) : fmtSol(valueSol),
       tone: 'neutral' as const,
     },
     {
       key: 'open_pnl',
       label: 'Open PnL (est.)',
-      value: fmtMoney(portfolio.open_pnl, true),
+      value: isLiveMode ? fmtSol(openPnlSol, true) : fmtMoney(portfolio.open_pnl, true),
+      sub: isLiveMode ? fmtMoney(portfolio.open_pnl, true) : fmtSol(openPnlSol, true),
       tone: portfolio.open_pnl > 0 ? 'green' : portfolio.open_pnl < 0 ? 'red' : 'neutral',
     },
     {
       key: 'day',
       label: "Today's PnL",
-      value: fmtMoney(portfolio.day_pnl, true),
+      value: isLiveMode ? fmtSol(dayPnlSol, true) : fmtMoney(portfolio.day_pnl, true),
+      sub: isLiveMode ? fmtMoney(portfolio.day_pnl, true) : fmtSol(dayPnlSol, true),
       tone: portfolio.day_pnl > 0 ? 'green' : portfolio.day_pnl < 0 ? 'red' : 'neutral',
     },
     {
       key: 'total',
       label: 'Realized PnL',
-      value: fmtMoney(portfolio.total_pnl, true),
+      value: isLiveMode ? fmtSol(totalPnlSol, true) : fmtMoney(portfolio.total_pnl, true),
+      sub: isLiveMode ? fmtMoney(portfolio.total_pnl, true) : fmtSol(totalPnlSol, true),
       tone: portfolio.total_pnl > 0 ? 'green' : portfolio.total_pnl < 0 ? 'red' : 'neutral',
     },
     {
       key: 'winrate',
       label: 'Win rate',
       value: portfolio.winrate || 'no closed trades',
+      sub: `SOL: $${solPrice.toFixed(2)}`,
       tone: 'neutral' as const,
     },
   ];
@@ -76,7 +100,7 @@ function BotAppContent() {
       {/* Top HeaderBar matching gui.py */}
       <HeaderBar />
 
-      {/* 6 KPI Cards Row matching gui.py */}
+      {/* 6 KPI Cards Row matching gui.py (SOL & $ side by side) */}
       <section className="px-5 pt-4 pb-2 shrink-0">
         <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-3">
           {kpiCards.map((card) => (
@@ -87,17 +111,22 @@ function BotAppContent() {
               <span className="text-[11px] font-medium text-[var(--dim)] whitespace-nowrap truncate">
                 {card.label}
               </span>
-              <span
-                className={`text-lg font-bold font-mono tabular-nums mt-0.5 whitespace-nowrap truncate ${
-                  card.tone === 'green'
-                    ? 'text-[var(--green)]'
-                    : card.tone === 'red'
-                    ? 'text-[var(--red)]'
-                    : 'text-[var(--text)]'
-                }`}
-              >
-                {card.value}
-              </span>
+              <div className="flex items-baseline justify-between gap-2 mt-0.5 min-w-0">
+                <span
+                  className={`text-base font-bold font-mono tabular-nums whitespace-nowrap truncate ${
+                    card.tone === 'green'
+                      ? 'text-[var(--green)]'
+                      : card.tone === 'red'
+                      ? 'text-[var(--red)]'
+                      : 'text-[var(--text)]'
+                  }`}
+                >
+                  {card.value}
+                </span>
+                <span className="text-[11px] font-mono tabular-nums text-[var(--muted)] whitespace-nowrap shrink-0">
+                  {card.sub}
+                </span>
+              </div>
             </div>
           ))}
         </div>
@@ -163,7 +192,7 @@ function BotAppContent() {
           {toastMessage ? toastMessage.text : 'Ready'}
         </span>
         <span className="text-[var(--dim)] font-mono whitespace-nowrap shrink-0 tabular-nums">
-          Mode: {(config.EXECUTION_MODE || 'paper').toUpperCase()} · Max slots: {config.max_open_positions || 3} · Trade size: ${config.trade_size_usd || 5}
+          Mode: {(config.EXECUTION_MODE || 'paper').toUpperCase()} · Max slots: {config.max_open_positions || 3} · Trade size: {fmtSol(tradeSizeSol)} ({fmtMoney(tradeSizeUsd)})
         </span>
       </footer>
 

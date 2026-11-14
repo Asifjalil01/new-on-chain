@@ -140,8 +140,9 @@ export const DashboardView: React.FC = () => {
               <thead className="sticky top-0 bg-[var(--panel)] border-b border-[var(--border)] text-[11px] font-semibold text-[var(--dim)] z-10">
                 <tr>
                   <th className="py-2.5 px-3">Coin</th>
+                  <th className="py-2.5 px-3 text-right">Size (SOL / $)</th>
                   <th className="py-2.5 px-3 text-right">PnL %</th>
-                  <th className="py-2.5 px-3 text-right">PnL $ (est.)</th>
+                  <th className="py-2.5 px-3 text-right">PnL (SOL / $)</th>
                   <th className="py-2.5 px-3 text-right">Entry price</th>
                   <th className="py-2.5 px-3 text-right">Price now</th>
                   <th className="py-2.5 px-3 text-right">Peak %</th>
@@ -177,10 +178,17 @@ export const DashboardView: React.FC = () => {
                       <td className="py-2 px-3 font-sans font-semibold text-[var(--text)] whitespace-nowrap">
                         {r.symbol}
                       </td>
+                      <td className="py-2 px-3 text-right text-[var(--text)] whitespace-nowrap">
+                        {r.cost_sol !== undefined ? `${r.cost_sol.toFixed(4)} SOL · ` : ''}
+                        <span className="text-[var(--muted)]">{fmtMoney(r.cost)}</span>
+                      </td>
                       <td className={`py-2 px-3 text-right whitespace-nowrap ${toneClass}`}>
                         {fmtPct(r.chg)}
                       </td>
                       <td className={`py-2 px-3 text-right whitespace-nowrap ${toneClass}`}>
+                        {r.pnl_sol !== undefined && r.pnl_sol !== null
+                          ? `${r.pnl_sol >= 0 ? '+' : ''}${r.pnl_sol.toFixed(4)} SOL · `
+                          : ''}
                         {fmtMoney(r.pnl_usd, true)}
                       </td>
                       <td className="py-2 px-3 text-right text-[var(--text)] whitespace-nowrap">

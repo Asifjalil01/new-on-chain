@@ -37,9 +37,13 @@ export type BotLifecycleState = 'STOPPED' | 'STARTING' | 'RUNNING' | 'STOPPING';
 export interface SniperConfig {
   // Core Capital & Risk (bot.py / gui.py)
   start_balance_usd: number;
+  start_balance_sol: number;
   trade_size_usd: number;
+  trade_size_sol: number;
   max_open_positions: number;
   daily_loss_limit_usd: number;
+  daily_loss_limit_sol: number;
+  sizing_basis: 'sol' | 'usd';
   take_profit_pct: number;
   trailing_stop_pct: number;
   stop_loss_pct: number;
@@ -80,6 +84,7 @@ export interface SniperConfig {
   EXECUTION_MODE: ExecutionMode;
   DEFAULT_CHAIN: string;
   MAX_POSITION_SIZE_USD: number;
+  MAX_POSITION_SIZE_SOL: number;
   MIN_GAS_RESERVE_SOL: number;
   MIN_GAS_RESERVE_ETH: number;
   PRIORITY_FEE_LEVEL: 'standard' | 'high' | 'ultra';
@@ -88,9 +93,13 @@ export interface SniperConfig {
 
 export const DEFAULT_CONFIG: SniperConfig = {
   start_balance_usd: 50.0,
+  start_balance_sol: 0.35,
   trade_size_usd: 5.0,
+  trade_size_sol: 0.035,
   max_open_positions: 3,
   daily_loss_limit_usd: 10.0,
+  daily_loss_limit_sol: 0.07,
+  sizing_basis: 'sol',
   take_profit_pct: 50.0,
   trailing_stop_pct: 0.0,
   stop_loss_pct: 35.0,
@@ -124,6 +133,7 @@ export const DEFAULT_CONFIG: SniperConfig = {
   EXECUTION_MODE: 'paper',
   DEFAULT_CHAIN: 'solana',
   MAX_POSITION_SIZE_USD: 100.0,
+  MAX_POSITION_SIZE_SOL: 0.7,
   MIN_GAS_RESERVE_SOL: 0.01,
   MIN_GAS_RESERVE_ETH: 0.005,
   PRIORITY_FEE_LEVEL: 'standard',
@@ -131,10 +141,13 @@ export const DEFAULT_CONFIG: SniperConfig = {
 };
 
 export const SETTING_LIMITS: Record<string, [number, number]> = {
-  start_balance_usd: [1, 1e7],
-  trade_size_usd: [0.5, 1e6],
+  start_balance_usd: [0.01, 1e7],
+  start_balance_sol: [0.0001, 1e6],
+  trade_size_usd: [0.01, 1e6],
+  trade_size_sol: [0.0001, 1e5],
   max_open_positions: [1, 50],
   daily_loss_limit_usd: [0, 1e7],
+  daily_loss_limit_sol: [0, 1e6],
   take_profit_pct: [0, 1e5],
   trailing_stop_pct: [0, 1000],
   stop_loss_pct: [0, 99.9],
@@ -322,6 +335,7 @@ export interface SniperPosition {
   qty: number;
   entry_price: number;
   cost: number;
+  cost_sol?: number;
   opened: number; // ms timestamp
   url: string;
   peak_price: number;
@@ -347,7 +361,9 @@ export interface SniperTradeRow {
   mint: string;
   price: number;
   usd: number;
+  sol_amount?: number;
   pnl_usd: number | null;
+  pnl_sol?: number | null;
   pnl_pct: number | null;
   reason: string;
   dexscreener: string;
@@ -456,7 +472,21 @@ function loadSettingsFromDisk() {
       const raw = JSON.parse(fs.readFileSync(SETTINGS_FILE, 'utf-8'));
       // Always start in PAPER mode for safety on boot, keeping other preferences
       const { EXECUTION_MODE: _ignored, ...rest } = raw || {};
-      botConfig = { ...DEFAULT_CONFIG, ...rest, EXECUTION_MODE: 'paper' };
+      const merged: SniperConfig = { ...DEFAULT_CONFIG, ...rest, EXECUTION_MODE: 'paper' };
+      const refSol = cachedSolPrice.price || 145;
+      if (rest?.start_balance_usd !== undefined && rest?.start_balance_sol === undefined) {
+        merged.start_balance_sol = Number((merged.start_balance_usd / refSol).toFixed(4));
+      }
+      if (rest?.trade_size_usd !== undefined && rest?.trade_size_sol === undefined) {
+        merged.trade_size_sol = Number((merged.trade_size_usd / refSol).toFixed(4));
+      }
+      if (rest?.daily_loss_limit_usd !== undefined && rest?.daily_loss_limit_sol === undefined) {
+        merged.daily_loss_limit_sol = Number((merged.daily_loss_limit_usd / refSol).toFixed(4));
+      }
+      if (rest?.MAX_POSITION_SIZE_USD !== undefined && rest?.MAX_POSITION_SIZE_SOL === undefined) {
+        merged.MAX_POSITION_SIZE_SOL = Number((merged.MAX_POSITION_SIZE_USD / refSol).toFixed(4));
+      }
+      botConfig = merged;
     }
   } catch {}
 }
@@ -1129,7 +1159,11 @@ function canOpenPosition(mode: ExecutionMode): { allowed: boolean; reason: strin
   if (Object.keys(ledger.positions).length >= c.max_open_positions) {
     return { allowed: false, reason: 'max positions' };
   }
-  if (ledger.day_pnl <= -c.daily_loss_limit_usd) {
+  const activeLossLimitUsd =
+    c.sizing_basis === 'sol' && (c.daily_loss_limit_sol ?? 0) > 0
+      ? c.daily_loss_limit_sol * (cachedSolPrice.price || 145)
+      : c.daily_loss_limit_usd;
+  if (activeLossLimitUsd > 0 && ledger.day_pnl <= -activeLossLimitUsd) {
     return { allowed: false, reason: 'daily loss limit' };
   }
 
@@ -1151,7 +1185,11 @@ function canOpenPosition(mode: ExecutionMode): { allowed: boolean; reason: strin
       }
     }
   } else {
-    if (ledger.cash < c.trade_size_usd) {
+    const requiredUsd =
+      c.sizing_basis === 'sol' && (c.trade_size_sol ?? 0) > 0
+        ? c.trade_size_sol * (cachedSolPrice.price || 145)
+        : c.trade_size_usd;
+    if (ledger.cash < requiredUsd) {
       return { allowed: false, reason: 'no cash' };
     }
   }
@@ -1182,7 +1220,17 @@ async function executeBuy(
 
     const c = botConfig;
     const cleanUrl = url || `https://dexscreener.com/solana/${mint}`;
-    const size = mode === 'live' ? Math.min(c.trade_size_usd, c.MAX_POSITION_SIZE_USD || 100) : c.trade_size_usd;
+    const solPriceUsd = await getSolPriceUsd();
+    const useSolBasis = c.sizing_basis === 'sol' && (c.trade_size_sol ?? 0) > 0;
+    const tradeSol =
+      mode === 'live'
+        ? useSolBasis
+          ? Math.min(c.trade_size_sol, c.MAX_POSITION_SIZE_SOL || c.trade_size_sol || 1)
+          : Math.min(c.trade_size_usd, c.MAX_POSITION_SIZE_USD || 100) / solPriceUsd
+        : useSolBasis
+        ? c.trade_size_sol
+        : c.trade_size_usd / solPriceUsd;
+    const size = tradeSol * solPriceUsd;
 
     let fill = price * (1 + c.slippage_pct / 100);
     let qty = (size * (1 - c.fee_pct / 100)) / fill;
@@ -1190,8 +1238,6 @@ async function executeBuy(
     let explorerUrl: string | undefined;
 
     if (mode === 'live') {
-      const solPriceUsd = await getSolPriceUsd();
-      const tradeSol = size / solPriceUsd;
       sniperLog(`⚡ [LIVE BUY START] ${symbol}: swapping ${tradeSol.toFixed(4)} SOL ($${size.toFixed(2)})...`, 'buy');
 
       let liveRes;
@@ -1274,6 +1320,7 @@ async function executeBuy(
       qty,
       entry_price: fill,
       cost: size,
+      cost_sol: tradeSol,
       opened: Date.now(),
       url: cleanUrl,
       peak_price: fill,
@@ -1301,7 +1348,9 @@ async function executeBuy(
       mint,
       price: fill,
       usd: size,
+      sol_amount: Math.round(tradeSol * 1e6) / 1e6,
       pnl_usd: null,
+      pnl_sol: null,
       pnl_pct: null,
       reason: 'sniper_entry',
       dexscreener: cleanUrl,
@@ -1316,7 +1365,7 @@ async function executeBuy(
     appendTradeCsv(tradeRow);
 
     sniperLog(
-      `✓ SNIPER BUY ${symbol} [${meta?.dex || '?'}/${meta?.source || '?'}] age ${(meta?.age_s || 0).toFixed(0)}s @ $${fmtPrice(fill)}${txHash ? ` (tx: ${txHash.slice(0, 8)}...)` : ''}`,
+      `✓ SNIPER BUY ${symbol} [${meta?.dex || '?'}/${meta?.source || '?'}] ${tradeSol.toFixed(4)} SOL ($${size.toFixed(2)}) @ $${fmtPrice(fill)}${txHash ? ` (tx: ${txHash.slice(0, 8)}...)` : ''}`,
       'buy'
     );
     saveStateToDisk();
@@ -1481,6 +1530,11 @@ async function executeSell(mode: ExecutionMode, mint: string, price: number, rea
       ledger.cash += proceeds;
     }
 
+    const solPriceNow = await getSolPriceUsd();
+    const costSol = pos.cost_sol ?? (solPriceNow > 0 ? pos.cost / solPriceNow : 0);
+    const proceedsSol = solPriceNow > 0 ? proceeds / solPriceNow : 0;
+    const pnlSol = proceedsSol - costSol;
+
     delete ledger.positions[mint];
     const pnl = proceeds - pos.cost;
     const pnlPct = pos.cost > 0 ? (pnl / pos.cost) * 100 : 0;
@@ -1500,7 +1554,9 @@ async function executeSell(mode: ExecutionMode, mint: string, price: number, rea
       mint,
       price: fill,
       usd: proceeds,
+      sol_amount: Math.round(proceedsSol * 1e6) / 1e6,
       pnl_usd: Math.round(pnl * 10000) / 10000,
+      pnl_sol: Math.round(pnlSol * 1e6) / 1e6,
       pnl_pct: Math.round(pnlPct * 100) / 100,
       reason: effectiveReason,
       dexscreener: pos.url || `https://dexscreener.com/solana/${mint}`,
@@ -1514,7 +1570,7 @@ async function executeSell(mode: ExecutionMode, mint: string, price: number, rea
     appendTradeCsv(tradeRow);
 
     sniperLog(
-      `✗ SELL ${pos.symbol} @ $${fmtPrice(fill)} pnl $${pnl.toFixed(2)} (${pnlPct.toFixed(1)}%) [${effectiveReason}]${txHash ? ` (tx: ${txHash.slice(0, 8)}...)` : ''}`,
+      `✗ SELL ${pos.symbol} @ $${fmtPrice(fill)} pnl ${pnlSol >= 0 ? '+' : ''}${pnlSol.toFixed(4)} SOL ($${pnl.toFixed(2)} / ${pnlPct.toFixed(1)}%) [${effectiveReason}]${txHash ? ` (tx: ${txHash.slice(0, 8)}...)` : ''}`,
       'sell'
     );
     saveStateToDisk();
@@ -1930,7 +1986,7 @@ function stopBotEngine() {
 }
 
 // ---------------- VIEW BUILDERS (matching gui.py) ----------------
-export function buildPositionRows(mode: ExecutionMode) {
+export function buildPositionRows(mode: ExecutionMode, solPriceUsd = cachedSolPrice.price || 145) {
   const ledger = ledgers[mode] || ledgers.paper;
   const c = botConfig;
   const nowMs = Date.now();
@@ -1944,6 +2000,9 @@ export function buildPositionRows(mode: ExecutionMode) {
       value = p.qty * price * (1 - c.slippage_pct / 100) * (1 - c.fee_pct / 100);
       pnlUsd = value - p.cost;
     }
+    const costSol = p.cost_sol ?? (solPriceUsd > 0 ? p.cost / solPriceUsd : 0);
+    const valueSol = value !== null && solPriceUsd > 0 ? value / solPriceUsd : null;
+    const pnlSol = pnlUsd !== null && solPriceUsd > 0 ? pnlUsd / solPriceUsd : null;
     const peak = p.entry_price > 0 ? ((p.peak_price || p.entry_price) / p.entry_price - 1) * 100 : 0;
     const low = p.entry_price > 0 ? ((p.low_price || p.entry_price) / p.entry_price - 1) * 100 : 0;
     const heldMin = (nowMs - p.opened) / 60000;
@@ -1954,8 +2013,11 @@ export function buildPositionRows(mode: ExecutionMode) {
       now: price,
       chg,
       pnl_usd: pnlUsd,
+      pnl_sol: pnlSol,
       value,
+      value_sol: valueSol,
       cost: p.cost,
+      cost_sol: costSol,
       peak,
       low,
       held: heldMin,
@@ -1970,28 +2032,43 @@ export function buildPositionRows(mode: ExecutionMode) {
   });
 }
 
-export function buildPortfolioStats(mode: ExecutionMode) {
+export function buildPortfolioStats(mode: ExecutionMode, solPriceUsd = cachedSolPrice.price || 145) {
   const ledger = ledgers[mode] || ledgers.paper;
   rollDay(ledger);
-  const rows = buildPositionRows(mode);
+  const rows = buildPositionRows(mode, solPriceUsd);
   const openPnl = rows.reduce((sum, r) => sum + (r.pnl_usd ?? 0), 0);
   const openValue = rows.reduce((sum, r) => sum + (r.value ?? r.cost), 0);
   const wins = ledger.wins;
   const closed = ledger.closed;
 
   let cash = ledger.cash;
+  let cashSol = solPriceUsd > 0 ? cash / solPriceUsd : 0;
   if (mode === 'live') {
     const liveWallet = getLiveConnectedWallet(botConfig.DEFAULT_CHAIN || 'solana');
-    cash = liveWallet && liveWallet.is_connected ? parseFloat(liveWallet.balance_usd.replace(/[^0-9.]/g, '')) || 0 : 0;
+    cashSol = liveWallet && liveWallet.is_connected ? liveWallet.raw_balance_num || 0 : 0;
+    const parsedUsd = liveWallet && liveWallet.is_connected ? parseFloat(liveWallet.balance_usd.replace(/[^0-9.]/g, '')) || 0 : 0;
+    cash = cashSol > 0 && solPriceUsd > 0 ? cashSol * solPriceUsd : parsedUsd;
   }
+
+  const totalValueUsd = cash + openValue;
+  const valueSol = solPriceUsd > 0 ? totalValueUsd / solPriceUsd : 0;
+  const openPnlSol = solPriceUsd > 0 ? openPnl / solPriceUsd : 0;
+  const dayPnlSol = solPriceUsd > 0 ? ledger.day_pnl / solPriceUsd : 0;
+  const totalPnlSol = solPriceUsd > 0 ? ledger.total_pnl / solPriceUsd : 0;
 
   return {
     mode,
+    sol_price_usd: solPriceUsd,
     cash,
-    value: cash + openValue,
+    cash_sol: cashSol,
+    value: totalValueUsd,
+    value_sol: valueSol,
     open_pnl: openPnl,
+    open_pnl_sol: openPnlSol,
     day_pnl: ledger.day_pnl,
+    day_pnl_sol: dayPnlSol,
     total_pnl: ledger.total_pnl,
+    total_pnl_sol: totalPnlSol,
     closed,
     wins,
     win_rate_pct: closed > 0 ? Math.round((wins / closed) * 1000) / 10 : 0,
@@ -2036,28 +2113,32 @@ async function startServer() {
       total_positions: Object.keys(ledgers[mode].positions).length,
       total_trades: ledgers[mode].trades.length,
       last_price_time: lastPriceTime,
+      sol_price_usd: cachedSolPrice.price,
       timestamp: Date.now(),
     });
   });
 
-  app.get('/api/status', (req, res) => {
+  app.get('/api/status', async (req, res) => {
     const mode = ((req.query.mode as ExecutionMode) || botConfig.EXECUTION_MODE) as ExecutionMode;
     const liveWallet = getLiveConnectedWallet(botConfig.DEFAULT_CHAIN || 'solana');
+    const solPriceUsd = await getSolPriceUsd();
     res.json({
       config: botConfig,
       status: {
         ...botStatus,
         lifecycle_state: currentLifecycleState,
       },
-      portfolio: buildPortfolioStats(mode),
+      portfolio: buildPortfolioStats(mode, solPriceUsd),
+      sol_price_usd: solPriceUsd,
       live_wallet: liveWallet,
       src_stats: _srcStats,
     });
   });
 
-  app.get('/api/positions', (req, res) => {
+  app.get('/api/positions', async (req, res) => {
     const mode = ((req.query.mode as ExecutionMode) || botConfig.EXECUTION_MODE) as ExecutionMode;
-    res.json(buildPositionRows(mode));
+    const solPriceUsd = await getSolPriceUsd();
+    res.json(buildPositionRows(mode, solPriceUsd));
   });
 
   app.post('/api/positions/:mint/sell', async (req, res) => {
@@ -2186,8 +2267,15 @@ async function startServer() {
     }
     if (raw.DEFAULT_CHAIN) parsed.DEFAULT_CHAIN = String(raw.DEFAULT_CHAIN).toLowerCase();
     if (raw.THEME && ['dark', 'light'].includes(raw.THEME)) parsed.THEME = raw.THEME;
+    if (raw.sizing_basis && ['sol', 'usd'].includes(raw.sizing_basis)) parsed.sizing_basis = raw.sizing_basis;
     if (raw.MAX_POSITION_SIZE_USD && Number(raw.MAX_POSITION_SIZE_USD) > 0) {
       parsed.MAX_POSITION_SIZE_USD = Number(raw.MAX_POSITION_SIZE_USD);
+    }
+    if (raw.MAX_POSITION_SIZE_SOL && Number(raw.MAX_POSITION_SIZE_SOL) > 0) {
+      parsed.MAX_POSITION_SIZE_SOL = Number(raw.MAX_POSITION_SIZE_SOL);
+    }
+    if (raw.MIN_GAS_RESERVE_SOL !== undefined && !isNaN(Number(raw.MIN_GAS_RESERVE_SOL)) && Number(raw.MIN_GAS_RESERVE_SOL) >= 0) {
+      parsed.MIN_GAS_RESERVE_SOL = Number(raw.MIN_GAS_RESERVE_SOL);
     }
     if (raw.PRIORITY_FEE_LEVEL && ['standard', 'high', 'ultra'].includes(raw.PRIORITY_FEE_LEVEL)) {
       parsed.PRIORITY_FEE_LEVEL = raw.PRIORITY_FEE_LEVEL;
@@ -2254,8 +2342,12 @@ async function startServer() {
         if (currentLifecycleState === 'RUNNING') {
           return res.status(400).json({ error: "Stop the bot first: press 'Stop bot', then reset the paper account." });
         }
-        ledgers.paper = createEmptyLedger(botConfig.start_balance_usd);
-        ledgers.testnet = createEmptyLedger(botConfig.start_balance_usd);
+        const resetBalUsd =
+          botConfig.sizing_basis === 'sol' && (botConfig.start_balance_sol ?? 0) > 0
+            ? botConfig.start_balance_sol * (cachedSolPrice.price || 145)
+            : botConfig.start_balance_usd;
+        ledgers.paper = createEmptyLedger(resetBalUsd);
+        ledgers.testnet = createEmptyLedger(resetBalUsd);
         livePrices.clear();
         try {
           if (fs.existsSync(STATE_FILE)) fs.unlinkSync(STATE_FILE);
@@ -2282,8 +2374,12 @@ async function startServer() {
     if (currentLifecycleState === 'RUNNING') {
       return res.status(400).json({ error: "Stop the bot first: press 'Stop bot', then reset the paper account." });
     }
-    ledgers.paper = createEmptyLedger(botConfig.start_balance_usd);
-    ledgers.testnet = createEmptyLedger(botConfig.start_balance_usd);
+    const resetBalUsd =
+      botConfig.sizing_basis === 'sol' && (botConfig.start_balance_sol ?? 0) > 0
+        ? botConfig.start_balance_sol * (cachedSolPrice.price || 145)
+        : botConfig.start_balance_usd;
+    ledgers.paper = createEmptyLedger(resetBalUsd);
+    ledgers.testnet = createEmptyLedger(resetBalUsd);
     livePrices.clear();
     try {
       if (fs.existsSync(STATE_FILE)) fs.unlinkSync(STATE_FILE);
@@ -2319,7 +2415,10 @@ async function startServer() {
     const live = getLiveConnectedWallet(chain);
     const mode = botConfig.EXECUTION_MODE;
     const solPrice = await getSolPriceUsd();
-    const tradeSol = botConfig.trade_size_usd / solPrice;
+    const tradeSol =
+      botConfig.sizing_basis === 'sol' && (botConfig.trade_size_sol ?? 0) > 0
+        ? botConfig.trade_size_sol
+        : botConfig.trade_size_usd / solPrice;
     const minGasReserve = botConfig.MIN_GAS_RESERVE_SOL;
     const minRequired = tradeSol + minGasReserve;
     const currentBal = live ? live.raw_balance_num : 0;

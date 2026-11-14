@@ -117,6 +117,7 @@ export const WalletsView: React.FC = () => {
     walletDiagnostics?.liveTradingReadiness === 'READY' ||
     (signerConnected && (signerStatus?.balanceSol ?? 0) >= Number(config.MIN_GAS_RESERVE_SOL || 0.01));
   const startBal = Number(config.start_balance_usd ?? 50);
+  const startBalSol = Number(config.start_balance_sol ?? Number((startBal / 145).toFixed(4)));
 
   return (
     <div className="flex-1 flex flex-col min-h-0 min-w-0 overflow-y-auto bg-[var(--bg)] p-4 space-y-4">
@@ -139,7 +140,7 @@ export const WalletsView: React.FC = () => {
               ? 'Real on-chain Solana mainnet wallet execution. Paper vault isolated.'
               : isTestnet
               ? 'Testnet / devnet RPC context.'
-              : `Paper trading simulation active ($${startBal.toFixed(2)} starting balance). Connect Phantom or set a Desktop Signer anytime for Live trading.`}
+              : `Paper trading simulation active (${startBalSol.toFixed(4)} SOL / $${startBal.toFixed(2)} starting balance). Connect Phantom or set a Desktop Signer anytime for Live trading.`}
           </span>
         </div>
       </div>
