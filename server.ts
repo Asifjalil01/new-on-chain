@@ -97,29 +97,29 @@ export const DEFAULT_CONFIG: SniperConfig = {
   start_balance_sol: 0.35,
   trade_size_usd: 5.0,
   trade_size_sol: 0.035,
-  max_open_positions: 3,
+  max_open_positions: 2,
   daily_loss_limit_usd: 10.0,
   daily_loss_limit_sol: 0.07,
   sizing_basis: 'sol',
-  take_profit_pct: 50.0,
-  trailing_stop_pct: 0.0,
-  stop_loss_pct: 35.0,
-  rug_exit_drop_pct: 85.0,
-  max_hold_minutes: 120,
-  max_age_minutes: 2.0,
-  ultra_early_grace_sec: 10,
+  take_profit_pct: 35.0,
+  trailing_stop_pct: 10.0,
+  stop_loss_pct: 25.0,
+  rug_exit_drop_pct: 75.0,
+  max_hold_minutes: 60,
+  max_age_minutes: 1.5,
+  ultra_early_grace_sec: 5,
   scan_interval_sec: 1,
   monitor_interval_sec: 1.0,
-  min_liquidity_usd: 300.0,
-  min_buys_m5: 2,
-  min_buy_sell_ratio_m5: 1.0,
-  max_price_change_m5_pct: 300.0,
-  min_volume_m5_usd: 0.0,
-  min_holders: 0,
+  min_liquidity_usd: 800.0,
+  min_buys_m5: 4,
+  min_buy_sell_ratio_m5: 1.5,
+  max_price_change_m5_pct: 150.0,
+  min_volume_m5_usd: 100.0,
+  min_holders: 20,
   use_rugcheck: true,
   strict_rugcheck: true,
-  rugcheck_max_score: 50.0,
-  max_top10_holder_pct: 75.0,
+  rugcheck_max_score: 30.0,
+  max_top10_holder_pct: 60.0,
   rug_recheck_minutes: 15,
   use_gecko: true,
   use_jupiter_recent: true,
@@ -1157,7 +1157,7 @@ function jupTokenToSnapshot(tok: any): any | null {
 async function fetchJupiterPairSnapshots(
   mints: string[],
   cfg: SniperConfig,
-  opts: { priority?: boolean } = {}
+  opts: { priority?: boolean; bypassCache?: boolean } = {}
 ): Promise<any[]> {
   if (mints.length === 0) return [];
   const now = Date.now();
@@ -1165,7 +1165,7 @@ async function fetchJupiterPairSnapshots(
   const uncached: string[] = [];
 
   for (const m of mints) {
-    const hit = _jupTokenCache.get(m);
+    const hit = !opts.bypassCache ? _jupTokenCache.get(m) : undefined;
     if (hit && now - hit.ts < 10_000) {
       const snap = jupTokenToSnapshot(hit.tok);
       if (snap) out.push(snap);
@@ -1321,11 +1321,12 @@ async function getOnChainSplTokenBalance(ownerAddress: string, mint: string): Pr
 export async function hardRugCheck(mint: string, cfg: SniperConfig, ageS: number): Promise<[boolean, string]> {
   const ttlMs = Math.max(60, (cfg.rug_recheck_minutes ?? 15) * 60) * 1000;
   const hit = _rugCache.get(mint);
-  if (hit && Date.now() - hit[0] < ttlMs) {
+  if (hit && Date.now() < hit[0]) {
     return hit[1];
   }
 
   let verdict: [boolean, string] = [true, 'ok'];
+  let reportMissing = false;
   const [rpcOk, ma, fa] = await rpcMintAuthorities(mint);
   if (rpcOk) {
     if (ma) verdict = [false, 'mint authority NOT revoked (on-chain: dev can mint supply)'];
@@ -1348,7 +1349,11 @@ export async function hardRugCheck(mint: string, cfg: SniperConfig, ageS: number
     const rep = await getJson(`${RUGC}/${mint}/report/summary`, undefined, 8000);
     const risks = rep && typeof rep === 'object' ? rep.risks : null;
     if (Array.isArray(risks)) {
-      if (!young) {
+      const lpLockedPct = _f(rep.lpLockedPct);
+      if (lpLockedPct !== null && lpLockedPct < 80) {
+        verdict = [false, `LP not locked (${lpLockedPct.toFixed(0)}% locked — dev can pull liquidity)`];
+      }
+      if (verdict[0] && !young) {
         let sn = _f(rep.score_normalised);
         if (sn !== null) {
           if (sn > 100) sn /= 1000.0;
@@ -1374,21 +1379,39 @@ export async function hardRugCheck(mint: string, cfg: SniperConfig, ageS: number
             }
             continue;
           }
-          if (ageS < 30 && (low.includes('liquidity') || low.includes('lp'))) continue;
-          if (!strict && !(low.includes('mint') || low.includes('freeze') || low.includes('authorit') || low.includes('holder'))) {
+          // Only tolerate "Low Liquidity" during the first 30s while RugCheck indexes pool TVL;
+          // NEVER ignore unlocked LP, mint/freeze, or Token-2022 trap dangers.
+          if (ageS < 30 && low.includes('low liquidity')) continue;
+          const criticalDanger =
+            low.includes('mint') ||
+            low.includes('freeze') ||
+            low.includes('authorit') ||
+            low.includes('holder') ||
+            low.includes('lp') ||
+            low.includes('unlock') ||
+            low.includes('transfer fee') ||
+            low.includes('non-transferable') ||
+            low.includes('permanent delegate');
+          if (!strict && !criticalDanger) {
             continue;
           }
           verdict = [false, `rugcheck danger: ${name || 'unknown risk'}`];
           break;
         }
       }
-    } else if (!young) {
-      verdict = [false, 'no rugcheck report (coin not brand new)'];
+    } else {
+      reportMissing = true;
+      if (!mint.endsWith('pump')) {
+        verdict = [false, 'rugcheck report pending (non-pump.fun LP not verified)'];
+      } else if (!young) {
+        verdict = [false, 'no rugcheck report (coin not brand new)'];
+      }
     }
   }
 
   if (_rugCache.size > 5000) _rugCache.clear();
-  _rugCache.set(mint, [Date.now(), verdict]);
+  const cacheForMs = reportMissing ? 10_000 : ttlMs;
+  _rugCache.set(mint, [Date.now() + cacheForMs, verdict]);
   return verdict;
 }
 
@@ -1999,6 +2022,13 @@ async function checkExits(
     const staleMin = (Date.now() - lastSeen) / 60000;
     const liq = liquidities.get(mint) ?? pos.last_liquidity_usd;
 
+    if (rugDrop > 0 && liq !== undefined && liq < 50 && (liq < 10 || heldMin >= 0.08)) {
+      const exitPx = price ?? 0;
+      const ok = await executeSell(mode, mint, exitPx, 'rug_liquidity_pulled');
+      if (ok) exits += 1;
+      continue;
+    }
+
     if (price === undefined || price === null) {
       let staleReason: string | null = null;
       if (heldMin >= maxHoldMin) {
@@ -2036,8 +2066,6 @@ async function checkExits(
       reason = `rug_drop_${rugDrop}`;
     } else if (sl > 0 && change <= -sl) {
       reason = `stop_loss_${sl}`;
-    } else if (rugDrop > 0 && liq !== undefined && liq < 50 && change <= -35) {
-      reason = 'rug_liquidity_pulled';
     } else if (heldMin >= maxHoldMin) {
       reason = 'max_hold';
     }
@@ -2128,9 +2156,10 @@ async function scanAndBuy() {
   _stats.no_pair += Math.max(0, scanBatch.length - pairs.size);
 
   const ledger = ledgers[mode];
+  const candidates: Array<{ mint: string; symbol: string; price: number; score: number; pair: any; ageS: number; meta: any }> = [];
+
   for (const [mint, [, pair]] of pairs.entries()) {
     if (currentLifecycleState !== 'RUNNING') break;
-    if (!canOpenPosition(mode).allowed) break;
     if (ledger.positions[mint] || ledger.blacklist.includes(mint)) continue;
 
     const symbol = pair?.baseToken?.symbol || '?';
@@ -2154,7 +2183,18 @@ async function scanAndBuy() {
     }
 
     const price = _f(pair?.priceUsd);
-    if (price === null) continue;
+    if (price === null || price <= 0) continue;
+
+    const liq = _f(pair?.liquidity?.usd) || 0;
+    const m5 = pair?.txns?.m5 || {};
+    const buys = Number(m5.buys || 0);
+    const sells = Number(m5.sells || 0);
+    const buyVol = _f(pair?.volume?.m5) || 0;
+    const holders = _f(pair?.holderCount) || 10;
+    const m5c = _f(pair?.priceChange?.m5) || 0;
+
+    // Profit Potential Score: rewards liquidity, buy volume, holder distribution, net buys, and healthy 5m momentum
+    const score = (liq * 0.2) + (buyVol * 0.4) + (holders * 3.0) + ((buys - sells) * 15) + (m5c > 0 && m5c <= 150 ? 100 : m5c > 150 ? 20 : -50);
 
     const meta = {
       dex: pair?.dexId || '?',
@@ -2162,33 +2202,77 @@ async function scanAndBuy() {
       age_s: ageS,
       decimals: pair?.baseToken?.decimals || 6,
     };
-    const bought = await executeBuy(mode, mint, symbol, price, pair?.url, meta);
-    if (bought) _stats.bought += 1;
+
+    candidates.push({ mint, symbol, price, score, pair, ageS, meta });
   }
+
+  if (candidates.length === 0) return;
+
+  // Sort candidates by score descending to pick the absolute best profit-potential coin
+  candidates.sort((a, b) => b.score - a.score);
+
+  // Take the top candidate
+  const best = candidates[0];
+  if (!canOpenPosition(mode).allowed) return;
+
+  sniperLog(`🏆 Best candidate selected: ${best.symbol} (score: ${best.score.toFixed(1)}, liq: $${(_f(best.pair?.liquidity?.usd) || 0).toFixed(0)}, h: ${_f(best.pair?.holderCount) || '?'})`, 'buy');
+  const bought = await executeBuy(mode, best.mint, best.symbol, best.price, best.pair?.url, best.meta);
+  if (bought) _stats.bought += 1;
 }
 
-let _lastJupPriceCache: { key: string; ts: number; map: Map<string, number> } | null = null;
+let _lastJupPriceCache: {
+  key: string;
+  ts: number;
+  map: Map<string, number>;
+  liqs: Map<string, number>;
+  dead: Set<string>;
+} | null = null;
 
-async function fetchJupiterPrices(mints: string[], cfg: SniperConfig): Promise<Map<string, number>> {
+async function fetchJupiterPrices(
+  mints: string[],
+  cfg: SniperConfig,
+  outLiquidities?: Map<string, number>,
+  outDeadMints?: Set<string>
+): Promise<Map<string, number>> {
   const prices = new Map<string, number>();
   if (!cfg.use_jupiter_price || mints.length === 0) return prices;
   const now = Date.now();
   const key = [...mints].sort().join(',');
   if (_lastJupPriceCache && _lastJupPriceCache.key === key && now - _lastJupPriceCache.ts < 2500) {
+    if (outLiquidities) for (const [m, l] of _lastJupPriceCache.liqs.entries()) outLiquidities.set(m, l);
+    if (outDeadMints) for (const m of _lastJupPriceCache.dead) outDeadMints.add(m);
     return new Map(_lastJupPriceCache.map);
   }
   if (now < _jupRateLimitUntil || now < _swapPriorityUntil) {
-    return _lastJupPriceCache ? new Map(_lastJupPriceCache.map) : prices;
+    if (_lastJupPriceCache) {
+      if (outLiquidities) for (const [m, l] of _lastJupPriceCache.liqs.entries()) outLiquidities.set(m, l);
+      if (outDeadMints) for (const m of _lastJupPriceCache.dead) outDeadMints.add(m);
+      return new Map(_lastJupPriceCache.map);
+    }
+    return prices;
   }
   const hdrs = cfg.jupiter_api_key ? { 'x-api-key': cfg.jupiter_api_key } : undefined;
   const data = await getJson(JUP_PRICE, { ids: mints.join(',') }, 4000, hdrs);
   if (!data || typeof data !== 'object') return prices;
+  const liqs = new Map<string, number>();
+  const dead = new Set<string>();
   for (const [mint, quote] of Object.entries<any>(data)) {
     const p = _f(quote?.usdPrice);
-    if (p !== null) prices.set(mint, p);
+    const liq = _f(quote?.liquidity);
+    const chg24 = _f(quote?.priceChange24h);
+    if (liq !== null) {
+      liqs.set(mint, liq);
+      outLiquidities?.set(mint, liq);
+    }
+    if (p !== null) {
+      prices.set(mint, p);
+    } else if ((liq !== null && liq < 50) || (chg24 !== null && chg24 <= -95 && (liq === null || liq < 100))) {
+      dead.add(mint);
+      outDeadMints?.add(mint);
+    }
   }
-  if (prices.size > 0) {
-    _lastJupPriceCache = { key, ts: Date.now(), map: new Map(prices) };
+  if (prices.size > 0 || liqs.size > 0 || dead.size > 0) {
+    _lastJupPriceCache = { key, ts: Date.now(), map: new Map(prices), liqs, dead };
   }
   return prices;
 }
@@ -2201,12 +2285,21 @@ async function monitorPositions() {
   const mints = Object.keys(ledger.positions);
   if (mints.length === 0) return;
 
-  const prices = await fetchJupiterPrices(mints, botConfig);
   const liquidities = new Map<string, number>();
+  const deadMints = new Set<string>();
+  const prices = await fetchJupiterPrices(mints, botConfig, liquidities, deadMints);
+
+  for (const [m, liq] of liquidities.entries()) {
+    if (ledger.positions[m]) {
+      ledger.positions[m].last_liquidity_usd = liq;
+    }
+  }
 
   const needDex = mints.filter((m) => {
     const px = prices.get(m);
     if (px === undefined || px <= 0) return true;
+    const liq = liquidities.get(m);
+    if (liq !== undefined && liq < 100) return true;
     const pos = ledger.positions[m];
     return pos && pos.entry_price > 0 && (px / pos.entry_price - 1) * 100 <= -40;
   });
@@ -2215,22 +2308,29 @@ async function monitorPositions() {
     const chunk = needDex.slice(i, i + 30);
     // [DEXSCREENER COMMENTED OUT — uncomment to restore DexScreener liquidity/price fallback]
     // const data = await getJson(`${DEX}/tokens/v1/solana/${chunk.join(',')}`, undefined, 4000);
-    const data = await fetchJupiterPairSnapshots(chunk, botConfig);
+    const data = await fetchJupiterPairSnapshots(chunk, botConfig, { priority: true, bypassCache: true });
     if (Array.isArray(data)) {
       for (const p of data) {
         const mint = p?.baseToken?.address;
         if (!mint || !ledger.positions[mint]) continue;
         const liq = _f(p?.liquidity?.usd);
         if (liq !== null) {
-          const prev = liquidities.get(mint) ?? 0;
-          if (liq > prev) liquidities.set(mint, liq);
-          ledger.positions[mint].last_liquidity_usd = Math.max(prev, liq);
+          liquidities.set(mint, liq);
+          ledger.positions[mint].last_liquidity_usd = liq;
         }
         if (!prices.has(mint)) {
           const px = _f(p?.priceUsd);
           if (px !== null) prices.set(mint, px);
         }
       }
+    }
+  }
+
+  for (const m of mints) {
+    const liq = liquidities.get(m);
+    if ((deadMints.has(m) || (liq !== undefined && liq < 10)) && !prices.has(m)) {
+      prices.set(m, 0);
+      livePrices.set(m, 0);
     }
   }
 

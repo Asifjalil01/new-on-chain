@@ -11,10 +11,10 @@ interface SettingField {
 }
 
 const SETTING_FIELDS: SettingField[] = [
-  { key: 'start_balance', solKey: 'start_balance_sol', usdKey: 'start_balance_usd', label: 'Start balance (used on reset)', kind: 'dual_sol_usd' },
-  { key: 'trade_size', solKey: 'trade_size_sol', usdKey: 'trade_size_usd', label: 'Trade size per coin', kind: 'dual_sol_usd' },
+  { key: 'start_balance', solKey: 'start_balance_sol', usdKey: 'start_balance_usd', label: 'Start balance $ (used on reset)', kind: 'dual_sol_usd' },
+  { key: 'trade_size', solKey: 'trade_size_sol', usdKey: 'trade_size_usd', label: 'Trade size $', kind: 'dual_sol_usd' },
   { key: 'max_open_positions', label: 'Max open positions', kind: 'int' },
-  { key: 'daily_loss_limit', solKey: 'daily_loss_limit_sol', usdKey: 'daily_loss_limit_usd', label: 'Daily loss limit (0 = off)', kind: 'dual_sol_usd' },
+  { key: 'daily_loss_limit', solKey: 'daily_loss_limit_sol', usdKey: 'daily_loss_limit_usd', label: 'Daily loss limit $', kind: 'dual_sol_usd' },
   { key: 'take_profit_pct', label: 'Take profit % (0 = off)', kind: 'float' },
   { key: 'trailing_stop_pct', label: 'Trailing stop % from peak (0 = off)', kind: 'float' },
   { key: 'stop_loss_pct', label: 'Stop loss % below entry (0 = off)', kind: 'float' },
@@ -30,6 +30,7 @@ const SETTING_FIELDS: SettingField[] = [
   { key: 'max_price_change_m5_pct', label: 'Skip if pumped +X% in 5 min', kind: 'float' },
   { key: 'min_volume_m5_usd', label: 'Min 5-min volume $ (0 = off)', kind: 'float' },
   { key: 'min_holders', label: 'Min holders (0 = off)', kind: 'int' },
+  { key: 'min_buys_m5', label: 'Min buys in last 1h (0 = off)', kind: 'int' },
   { key: 'use_rugcheck', label: 'Hard RugCheck (score + risks)', kind: 'bool' },
   { key: 'strict_rugcheck', label: 'Strict: reject ANY danger risk', kind: 'bool' },
   { key: 'rugcheck_max_score', label: 'Max RugCheck risk score (0-100)', kind: 'float' },
