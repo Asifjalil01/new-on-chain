@@ -9,6 +9,8 @@ export interface LiveBuyParams {
   tradeAmountUsd: number;
   maxSlippageBps?: number;
   priorityFeeLevel?: 'standard' | 'high' | 'ultra';
+  solPriceUsd?: number;
+  jupiterApiKey?: string;
   onStepProgress?: (step: string, detail?: string) => void;
 }
 
@@ -20,6 +22,8 @@ export interface LiveSellParams {
   tokenDecimals?: number;
   maxSlippageBps?: number;
   priorityFeeLevel?: 'standard' | 'high' | 'ultra';
+  solPriceUsd?: number;
+  jupiterApiKey?: string;
   onStepProgress?: (step: string, detail?: string) => void;
 }
 
@@ -174,49 +178,71 @@ export async function getTradingSignerStatus(): Promise<{
   };
 }
 
+function parseRetryWaitMs(res: Response, attempt: number): number {
+  const ra = res.headers.get('retry-after');
+  if (ra) {
+    const sec = Number(ra);
+    if (Number.isFinite(sec) && sec > 0) return Math.min(5000, Math.max(800, sec * 1000));
+  }
+  return Math.min(4500, 1200 * (attempt + 1));
+}
+
 /**
- * Fetch real-time Jupiter Swap Quote
+ * Fetch real-time Jupiter Swap Quote (with 429 rate-limit backoff retries)
  */
 export async function fetchJupiterQuote(
   inputMint: string,
   outputMint: string,
   amountLamportsOrUnits: number,
-  slippageBps: number = 100
+  slippageBps: number = 100,
+  jupiterApiKey?: string
 ): Promise<any> {
   const qs = `inputMint=${inputMint}&outputMint=${outputMint}&amount=${Math.floor(amountLamportsOrUnits)}&slippageBps=${slippageBps}&swapMode=ExactIn`;
   const endpoints = [
     `https://lite-api.jup.ag/swap/v1/quote?${qs}`,
     `https://api.jup.ag/swap/v1/quote?${qs}`,
   ];
+  const hdrs: Record<string, string> = jupiterApiKey ? { 'x-api-key': jupiterApiKey } : {};
 
   let lastErr = 'Jupiter Quote API unreachable';
-  for (const url of endpoints) {
-    try {
-      const res = await fetch(url, { signal: AbortSignal.timeout(6000) });
-      if (!res.ok) {
-        lastErr = `Jupiter Quote API returned ${res.status}: ${await res.text()}`;
-        continue;
+  for (let attempt = 0; attempt < 3; attempt++) {
+    let sawRateLimit = false;
+    let waitMs = 1200 * (attempt + 1);
+    for (const url of endpoints) {
+      try {
+        const res = await fetch(url, { headers: hdrs, signal: AbortSignal.timeout(6000) });
+        if (!res.ok) {
+          lastErr = `Jupiter Quote API returned ${res.status}: ${await res.text()}`;
+          if (res.status === 429 || res.status >= 500) {
+            sawRateLimit = true;
+            waitMs = Math.max(waitMs, parseRetryWaitMs(res, attempt));
+          }
+          continue;
+        }
+        const quote = await res.json();
+        if (!quote || !quote.outAmount) {
+          lastErr = 'No executable route found for this swap pair.';
+          continue;
+        }
+        return quote;
+      } catch (e: any) {
+        lastErr = e.message;
       }
-      const quote = await res.json();
-      if (!quote || !quote.outAmount) {
-        lastErr = 'No executable route found for this swap pair.';
-        continue;
-      }
-      return quote;
-    } catch (e: any) {
-      lastErr = e.message;
     }
+    if (!sawRateLimit || attempt >= 2) break;
+    await new Promise((r) => setTimeout(r, waitMs));
   }
   throw new Error(lastErr);
 }
 
 /**
- * Build Jupiter Versioned Swap Transaction
+ * Build Jupiter Versioned Swap Transaction (with 429 rate-limit backoff retries)
  */
 export async function buildJupiterSwapTransaction(
   quoteResponse: any,
   userPublicKey: string,
-  priorityFeeLevel: 'standard' | 'high' | 'ultra' = 'standard'
+  priorityFeeLevel: 'standard' | 'high' | 'ultra' = 'standard',
+  jupiterApiKey?: string
 ): Promise<string> {
   const feeMap = {
     standard: 50000,
@@ -236,29 +262,43 @@ export async function buildJupiterSwapTransaction(
     'https://lite-api.jup.ag/swap/v1/swap',
     'https://api.jup.ag/swap/v1/swap',
   ];
+  const hdrs: Record<string, string> = {
+    'Content-Type': 'application/json',
+    ...(jupiterApiKey ? { 'x-api-key': jupiterApiKey } : {}),
+  };
 
   let lastErr = 'Jupiter Swap API unreachable';
-  for (const url of endpoints) {
-    try {
-      const res = await fetch(url, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(body),
-        signal: AbortSignal.timeout(8000),
-      });
-      if (!res.ok) {
-        lastErr = `Jupiter Swap Build API returned ${res.status}: ${await res.text()}`;
-        continue;
+  for (let attempt = 0; attempt < 3; attempt++) {
+    let sawRateLimit = false;
+    let waitMs = 1200 * (attempt + 1);
+    for (const url of endpoints) {
+      try {
+        const res = await fetch(url, {
+          method: 'POST',
+          headers: hdrs,
+          body: JSON.stringify(body),
+          signal: AbortSignal.timeout(8000),
+        });
+        if (!res.ok) {
+          lastErr = `Jupiter Swap Build API returned ${res.status}: ${await res.text()}`;
+          if (res.status === 429 || res.status >= 500) {
+            sawRateLimit = true;
+            waitMs = Math.max(waitMs, parseRetryWaitMs(res, attempt));
+          }
+          continue;
+        }
+        const data = await res.json();
+        if (!data || !data.swapTransaction) {
+          lastErr = 'Jupiter Swap API did not return a valid serialized transaction';
+          continue;
+        }
+        return data.swapTransaction;
+      } catch (e: any) {
+        lastErr = e.message;
       }
-      const data = await res.json();
-      if (!data || !data.swapTransaction) {
-        lastErr = 'Jupiter Swap API did not return a valid serialized transaction';
-        continue;
-      }
-      return data.swapTransaction;
-    } catch (e: any) {
-      lastErr = e.message;
     }
+    if (!sawRateLimit || attempt >= 2) break;
+    await new Promise((r) => setTimeout(r, waitMs));
   }
   throw new Error(lastErr);
 }
@@ -311,7 +351,7 @@ export async function confirmAndVerifySolanaTransaction(
 
   try {
     const parsedTx = await connection.getParsedTransaction(signature, {
-      maxSupportedTransactionVersion: 0,
+      maxSupportedTransactionVersion: 1,
       commitment: 'confirmed',
     });
 
@@ -408,14 +448,20 @@ export async function executeLiveSolanaBuy(params: LiveBuyParams): Promise<LiveT
       WSOL_MINT,
       params.tokenAddress,
       amountLamports,
-      params.maxSlippageBps || 100
+      params.maxSlippageBps || 100,
+      params.jupiterApiKey
     );
 
     const estTokensOut = parseFloat(quote.outAmount) / Math.pow(10, quote.outAmountDecimals || 6);
     notify('BUILDING_TRANSACTION', `Building swap transaction (Route: ${quote.routePlan?.map((r: any) => r.swapInfo?.label || 'DEX').join(' -> ')})...`);
 
     // 2. Build swap transaction
-    const base64Tx = await buildJupiterSwapTransaction(quote, userPubkey, params.priorityFeeLevel || 'standard');
+    const base64Tx = await buildJupiterSwapTransaction(
+      quote,
+      userPubkey,
+      params.priorityFeeLevel || 'standard',
+      params.jupiterApiKey
+    );
 
     // 3. Sign transaction locally using server trading keypair
     notify('SIGNING_TRANSACTION', `Signing versioned transaction with trading keypair ${userPubkey.slice(0, 4)}...`);
@@ -453,6 +499,7 @@ export async function executeLiveSolanaBuy(params: LiveBuyParams): Promise<LiveT
       };
     }
 
+    const solUsd = params.solPriceUsd && params.solPriceUsd > 1 ? params.solPriceUsd : 145.0;
     const actualTokens = verifyResult.actualTokensReceived || estTokensOut;
     const actualSolSpent = verifyResult.actualSolSpent || params.tradeAmountSol;
     const effectivePriceUsd = actualTokens > 0 ? (params.tradeAmountUsd / actualTokens) : (params.tradeAmountUsd / estTokensOut);
@@ -466,8 +513,8 @@ export async function executeLiveSolanaBuy(params: LiveBuyParams): Promise<LiveT
       actualAmountIn: actualSolSpent,
       actualAmountOut: actualTokens,
       actualEffectivePriceUsd: effectivePriceUsd,
-      gasCostUsd: ((verifyResult.feeLamports || 5000) / 1e9) * 145.0,
-      totalFeesUsd: ((verifyResult.feeLamports || 5000) / 1e9) * 145.0,
+      gasCostUsd: ((verifyResult.feeLamports || 5000) / 1e9) * solUsd,
+      totalFeesUsd: ((verifyResult.feeLamports || 5000) / 1e9) * solUsd,
       timestamp: Date.now(),
       executionDurationMs: Date.now() - start,
     };
@@ -522,14 +569,20 @@ export async function executeLiveSolanaSell(params: LiveSellParams): Promise<Liv
       params.tokenAddress,
       WSOL_MINT,
       rawAmount,
-      params.maxSlippageBps || 150
+      params.maxSlippageBps || 150,
+      params.jupiterApiKey
     );
 
     const estSolReceived = parseFloat(quote.outAmount) / 1e9;
     notify('BUILDING_TRANSACTION', `Building exit transaction for ${estSolReceived.toFixed(4)} SOL proceeds...`);
 
     // 2. Build swap transaction
-    const base64Tx = await buildJupiterSwapTransaction(quote, userPubkey, params.priorityFeeLevel || 'high');
+    const base64Tx = await buildJupiterSwapTransaction(
+      quote,
+      userPubkey,
+      params.priorityFeeLevel || 'high',
+      params.jupiterApiKey
+    );
 
     // 3. Sign transaction locally
     notify('SIGNING_TRANSACTION', 'Signing exit transaction with trading keypair...');
@@ -567,8 +620,9 @@ export async function executeLiveSolanaSell(params: LiveSellParams): Promise<Liv
       };
     }
 
+    const solUsd = params.solPriceUsd && params.solPriceUsd > 1 ? params.solPriceUsd : 145.0;
     const actualSolReceived = verifyResult.actualSolReceived || estSolReceived;
-    const exitPriceUsd = (actualSolReceived * 145.0) / params.tokenQuantity;
+    const exitPriceUsd = (actualSolReceived * solUsd) / params.tokenQuantity;
 
     notify('SELL_CONFIRMED', `Successfully sold ${params.tokenQuantity.toFixed(2)} ${params.tokenSymbol} for ${actualSolReceived.toFixed(4)} SOL!`);
 
@@ -579,8 +633,8 @@ export async function executeLiveSolanaSell(params: LiveSellParams): Promise<Liv
       actualAmountIn: params.tokenQuantity,
       actualAmountOut: actualSolReceived,
       actualEffectivePriceUsd: exitPriceUsd,
-      gasCostUsd: ((verifyResult.feeLamports || 5000) / 1e9) * 145.0,
-      totalFeesUsd: ((verifyResult.feeLamports || 5000) / 1e9) * 145.0,
+      gasCostUsd: ((verifyResult.feeLamports || 5000) / 1e9) * solUsd,
+      totalFeesUsd: ((verifyResult.feeLamports || 5000) / 1e9) * solUsd,
       timestamp: Date.now(),
       executionDurationMs: Date.now() - start,
     };
@@ -733,3 +787,106 @@ export async function finalizeBrowserSignedTransaction(params: {
     executionDurationMs: Date.now() - start,
   };
 }
+
+export interface ExternalSellLookupResult {
+  found: boolean;
+  signature?: string;
+  explorerUrl?: string;
+  actualSolReceived?: number;
+  ataRentReclaimedSol?: number;
+  tokensSold?: number;
+  blockTimeMs?: number;
+}
+
+/**
+ * Look up a manual/external sell transaction on-chain (e.g. sold directly in Phantom)
+ * to recover the actual SOL proceeds instead of estimating from a later spot price.
+ */
+export async function findExternalSellOnChain(
+  ownerPubkey: string,
+  mint: string,
+  sinceMs: number = 0
+): Promise<ExternalSellLookupResult> {
+  try {
+    const pubkey = new PublicKey(ownerPubkey);
+    for (const endpoint of SOLANA_RPC_ENDPOINTS) {
+      try {
+        const conn = new Connection(endpoint, { commitment: 'confirmed' });
+        const sigs = await conn.getSignaturesForAddress(pubkey, { limit: 25 });
+        for (const s of sigs) {
+          if (s.err) continue;
+          if (sinceMs > 0 && s.blockTime && s.blockTime * 1000 < sinceMs - 30_000) {
+            break;
+          }
+          const parsed = await conn.getParsedTransaction(s.signature, {
+            maxSupportedTransactionVersion: 1,
+            commitment: 'confirmed',
+          });
+          if (!parsed || !parsed.meta || parsed.meta.err) continue;
+
+          const preTok = (parsed.meta.preTokenBalances || []).find(
+            (b) => b.owner === ownerPubkey && b.mint === mint
+          );
+          if (!preTok) continue;
+          const preAmt = preTok.uiTokenAmount?.uiAmount || 0;
+          if (preAmt <= 0) continue;
+
+          const postTok = (parsed.meta.postTokenBalances || []).find(
+            (b) => b.owner === ownerPubkey && b.mint === mint
+          );
+          const postAmt = postTok?.uiTokenAmount?.uiAmount || 0;
+          const soldAmt = preAmt - postAmt;
+          if (soldAmt <= 0 || (postAmt > 0.000001 && soldAmt < preAmt * 0.8)) continue;
+
+          const keys = parsed.transaction.message.accountKeys.map((k) =>
+            typeof k === 'string' ? k : k.pubkey.toBase58()
+          );
+          const idx = keys.indexOf(ownerPubkey);
+          if (idx === -1) continue;
+
+          const preLamports = parsed.meta.preBalances[idx] || 0;
+          const postLamports = parsed.meta.postBalances[idx] || 0;
+          let solDelta = (postLamports - preLamports) / 1e9;
+
+          const preWsol = (parsed.meta.preTokenBalances || []).find(
+            (b) => b.owner === ownerPubkey && b.mint === WSOL_MINT
+          );
+          const postWsol = (parsed.meta.postTokenBalances || []).find(
+            (b) => b.owner === ownerPubkey && b.mint === WSOL_MINT
+          );
+          const wsolDelta =
+            (postWsol?.uiTokenAmount?.uiAmount || 0) - (preWsol?.uiTokenAmount?.uiAmount || 0);
+          if (wsolDelta > 0) solDelta += wsolDelta;
+
+          // If the token ATA itself was closed in this same tx, exclude its refunded rent from trade PnL
+          let ataRentReclaimedSol = 0;
+          const tokAccIdx = preTok.accountIndex;
+          if (
+            typeof tokAccIdx === 'number' &&
+            (parsed.meta.preBalances?.[tokAccIdx] || 0) > 0 &&
+            (parsed.meta.postBalances?.[tokAccIdx] || 0) === 0
+          ) {
+            ataRentReclaimedSol = (parsed.meta.preBalances[tokAccIdx] || 0) / 1e9;
+          }
+
+          if (solDelta > 0) {
+            return {
+              found: true,
+              signature: s.signature,
+              explorerUrl: `https://solscan.io/tx/${s.signature}`,
+              actualSolReceived: Math.max(0, solDelta - ataRentReclaimedSol),
+              ataRentReclaimedSol,
+              tokensSold: soldAmt,
+              blockTimeMs: s.blockTime ? s.blockTime * 1000 : undefined,
+            };
+          }
+        }
+        return { found: false };
+      } catch (_) {
+        // try next RPC endpoint
+      }
+    }
+  } catch (_) {}
+  return { found: false };
+}
+

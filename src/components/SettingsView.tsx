@@ -29,7 +29,7 @@ const SETTING_FIELDS: SettingField[] = [
   { key: 'min_buy_sell_ratio_m5', label: 'Min buy/sell ratio (5 min)', kind: 'float' },
   { key: 'max_price_change_m5_pct', label: 'Skip if pumped +X% in 5 min', kind: 'float' },
   { key: 'min_volume_m5_usd', label: 'Min 5-min volume $ (0 = off)', kind: 'float' },
-  { key: 'min_holders', label: 'Min buys in last 1h (0 = off)', kind: 'int' },
+  { key: 'min_holders', label: 'Min holders (0 = off)', kind: 'int' },
   { key: 'use_rugcheck', label: 'Hard RugCheck (score + risks)', kind: 'bool' },
   { key: 'strict_rugcheck', label: 'Strict: reject ANY danger risk', kind: 'bool' },
   { key: 'rugcheck_max_score', label: 'Max RugCheck risk score (0-100)', kind: 'float' },
@@ -98,6 +98,8 @@ export const SettingsView: React.FC = () => {
   const [isSaving, setIsSaving] = useState(false);
   const [confirmReset, setConfirmReset] = useState(false);
 
+  const configSnapshot = JSON.stringify(config);
+
   useEffect(() => {
     const next: Record<string, any> = {};
     for (const f of SETTING_FIELDS) {
@@ -130,7 +132,7 @@ export const SettingsView: React.FC = () => {
     next.MIN_GAS_RESERVE_SOL = String(config.MIN_GAS_RESERVE_SOL ?? 0.01);
     next.PRIORITY_FEE_LEVEL = config.PRIORITY_FEE_LEVEL || 'standard';
     setValues(next);
-  }, [config]);
+  }, [configSnapshot]);
 
   const handleFieldChange = (key: string, val: any) => {
     setValues((prev) => ({ ...prev, [key]: val }));
