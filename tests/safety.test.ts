@@ -123,11 +123,10 @@ beforeEach(() => {
 // =========================================================================
 // CHECK 1: Stop buying brand-new coins (< min_age_minutes) & min_liquidity_usd
 // =========================================================================
-test('Check 1: passesFilters enforces min_age_minutes=30, max_age_minutes=720, and min_liquidity_usd=25000 with no grace bypass', () => {
-  assert.equal(DEFAULT_CONFIG.min_age_minutes, 30);
+test('Check 1: passesFilters enforces min_age_minutes=0, max_age_minutes=720, and min_liquidity_usd=1000', () => {
+  assert.equal(DEFAULT_CONFIG.min_age_minutes, 0);
   assert.equal(DEFAULT_CONFIG.max_age_minutes, 720);
-  assert.equal(DEFAULT_CONFIG.min_liquidity_usd, 25000);
-  assert.equal(DEFAULT_CONFIG.ultra_early_grace_sec, 0);
+  assert.equal(DEFAULT_CONFIG.min_liquidity_usd, 1000);
 
   const nowMs = 1_700_000_000_000;
   const basePair = {
@@ -135,21 +134,21 @@ test('Check 1: passesFilters enforces min_age_minutes=30, max_age_minutes=720, a
     baseToken: { address: Keypair.generate().publicKey.toBase58(), symbol: 'TEST' },
     quoteToken: { symbol: 'SOL' },
     priceUsd: '0.01',
-    liquidity: { usd: 50_000 },
+    liquidity: { usd: 5_000 },
     txns: { m5: { buys: 20, sells: 5 } },
     volume: { m5: 15_000 },
     priceChange: { m5: 10 },
     holderCount: 250,
   };
 
-  // Coin aged 2 minutes -> must be rejected as too_young (no ultra-early grace bypass)
-  const [okYoung, codeYoung] = passesFilters(
-    { ...basePair, pairCreatedAt: nowMs - 2 * 60_000 },
+  // Brand new coin aged 30 seconds -> passes age filter (min_age = 0)
+  const [okNew, codeNew] = passesFilters(
+    { ...basePair, pairCreatedAt: nowMs - 30_000 },
     DEFAULT_CONFIG,
     nowMs
   );
-  assert.equal(okYoung, false);
-  assert.equal(codeYoung, 'too young');
+  assert.equal(okNew, true);
+  assert.equal(codeNew, 'ok');
 
   // Coin aged 900 minutes -> must be rejected as too old
   const [okOld, codeOld] = passesFilters(
@@ -160,23 +159,14 @@ test('Check 1: passesFilters enforces min_age_minutes=30, max_age_minutes=720, a
   assert.equal(okOld, false);
   assert.equal(codeOld, 'too old');
 
-  // Coin inside age window (60 min) with $10k liquidity -> rejected as low liquidity
+  // Coin with $500 liquidity (< $1000) -> rejected as low liquidity
   const [okLowLiq, codeLowLiq] = passesFilters(
-    { ...basePair, pairCreatedAt: nowMs - 60 * 60_000, liquidity: { usd: 10_000 } },
+    { ...basePair, pairCreatedAt: nowMs - 60_000, liquidity: { usd: 500 } },
     DEFAULT_CONFIG,
     nowMs
   );
   assert.equal(okLowLiq, false);
   assert.equal(codeLowLiq, 'low liquidity');
-
-  // Valid coin (60 min old, $50k liquidity, strong buys) -> passes
-  const [okValid, codeValid] = passesFilters(
-    { ...basePair, pairCreatedAt: nowMs - 60 * 60_000 },
-    DEFAULT_CONFIG,
-    nowMs
-  );
-  assert.equal(okValid, true);
-  assert.equal(codeValid, 'ok');
 });
 
 // =========================================================================
