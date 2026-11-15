@@ -1,15 +1,17 @@
 import React, { useState } from 'react';
-import { Copy, Check, ExternalLink, Play, ShieldAlert, X } from 'lucide-react';
+import { Copy, Check, ExternalLink, Play, ShieldAlert, X, AlertTriangle, Clock } from 'lucide-react';
 import { useBot } from '../context/BotContext';
 import { fmtPrice, fmtMoney, fmtPct, fmtHeld } from '../utils/formatters';
 
 export const DashboardView: React.FC = () => {
   const {
     positions,
+    pendingBuys,
     config,
     isBotStopped,
     handleStartStop,
     handleSellPosition,
+    handleManualClearPosition,
     handleSellAll,
     handleProbe,
     say,
@@ -70,6 +72,19 @@ export const DashboardView: React.FC = () => {
 
   return (
     <div className="flex-1 flex flex-col min-h-0 min-w-0 p-4 gap-3 bg-[var(--bg)]">
+      {/* Pending On-Chain Confirmation Banner */}
+      {pendingBuys.length > 0 && (
+        <div className="px-4 py-2.5 rounded-lg border border-[var(--orange)]/50 bg-[var(--orange)]/10 flex flex-wrap items-center justify-between gap-2 text-xs">
+          <div className="flex items-center gap-2 text-[var(--orange)] font-semibold">
+            <Clock size={14} className="shrink-0" />
+            <span>
+              Pending on-chain confirmation ({pendingBuys.length}):{' '}
+              {pendingBuys.map((p) => `${p.symbol} (${p.signature.slice(0, 8)}...)`).join(', ')} — polling before treating as failed.
+            </span>
+          </div>
+        </div>
+      )}
+
       {/* Inline Sell Confirmation Banner (replaces forbidden window.confirm in iFrame) */}
       {(confirmTarget || confirmSellAll) && (
         <div className="px-4 py-2.5 rounded-lg border border-[var(--red)]/50 bg-[var(--red)]/10 flex flex-wrap items-center justify-between gap-3 text-xs">
@@ -111,7 +126,7 @@ export const DashboardView: React.FC = () => {
           <div className="flex-1 flex flex-col items-center justify-center p-8 text-center gap-3">
             <p className="text-sm font-semibold text-[var(--text)]">No open positions</p>
             <p className="text-xs text-[var(--muted)] max-w-md leading-relaxed">
-              The sniper monitors GeckoTerminal, Jupiter recent launches, DexScreener token profiles, and PumpPortal for brand-new Solana coins passing liquidity and hard RugCheck screens.
+              The sniper monitors GeckoTerminal, Jupiter, DexScreener, and PumpPortal for tokens inside your {config.min_age_minutes ?? 30}m–{config.max_age_minutes ?? 720}m maturity window that pass liquidity, fail-closed RugCheck, on-chain holder concentration, and sell-route checks.
             </p>
             <div className="flex items-center gap-2 mt-1">
               {isBotStopped ? (
@@ -147,6 +162,7 @@ export const DashboardView: React.FC = () => {
                   <th className="py-2.5 px-3 text-right">Price now</th>
                   <th className="py-2.5 px-3 text-right">Peak %</th>
                   <th className="py-2.5 px-3 text-right">Low %</th>
+                  <th className="py-2.5 px-3 text-right">Entry TP / SL</th>
                   <th className="py-2.5 px-3 text-right">Held</th>
                   <th className="py-2.5 px-3">Source</th>
                   <th className="py-2.5 px-3">Coin key (token address)</th>
@@ -172,11 +188,36 @@ export const DashboardView: React.FC = () => {
                       className={`h-[40px] cursor-pointer transition-colors ${
                         isSelected
                           ? 'bg-[var(--teal)]/12'
+                          : r.needs_review
+                          ? 'bg-[var(--orange)]/8 hover:bg-[var(--orange)]/15'
                           : 'hover:bg-[var(--card-hover)]'
                       }`}
                     >
                       <td className="py-2 px-3 font-sans font-semibold text-[var(--text)] whitespace-nowrap">
-                        {r.symbol}
+                        <div className="flex items-center gap-1.5">
+                          <span>{r.symbol}</span>
+                          {r.needs_review && (
+                            <>
+                              <span
+                                title={r.needs_review_reason || 'Zero balance read without confirmed on-chain sell'}
+                                className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded bg-[var(--orange)]/20 border border-[var(--orange)]/50 text-[var(--orange)] text-[10px] font-bold"
+                              >
+                                <AlertTriangle size={10} />
+                                NEEDS REVIEW
+                              </span>
+                              <button
+                                type="button"
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  handleManualClearPosition(r.mint);
+                                }}
+                                className="px-1.5 py-0.5 rounded border border-[var(--red)]/50 bg-[var(--red)]/10 text-[var(--red)] hover:bg-[var(--red)] hover:text-white text-[10px] font-semibold cursor-pointer"
+                              >
+                                Clear
+                              </button>
+                            </>
+                          )}
+                        </div>
                       </td>
                       <td className="py-2 px-3 text-right text-[var(--text)] whitespace-nowrap">
                         {r.cost_sol !== undefined ? `${r.cost_sol.toFixed(4)} SOL · ` : ''}
@@ -202,6 +243,11 @@ export const DashboardView: React.FC = () => {
                       </td>
                       <td className="py-2 px-3 text-right text-[var(--red)] whitespace-nowrap">
                         {fmtPct(r.low)}
+                      </td>
+                      <td className="py-2 px-3 text-right text-[11px] text-[var(--muted)] whitespace-nowrap">
+                        {r.exit_params
+                          ? `+${r.exit_params.take_profit_pct}% / -${r.exit_params.stop_loss_pct}%`
+                          : '—'}
                       </td>
                       <td className="py-2 px-3 text-right text-[var(--muted)] whitespace-nowrap">
                         {fmtHeld(r.held)}
@@ -282,7 +328,7 @@ export const DashboardView: React.FC = () => {
 
         <div className="text-xs font-medium text-[var(--dim)] tabular-nums">
           {positions.length > 0
-            ? `${positions.length} of ${config.max_open_positions || 3} slots in use`
+            ? `${positions.length} of ${config.max_open_positions || 2} slots in use`
             : 'No open positions'}
         </div>
       </div>

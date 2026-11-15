@@ -11,6 +11,7 @@ export interface LiveBuyParams {
   priorityFeeLevel?: 'standard' | 'high' | 'ultra';
   solPriceUsd?: number;
   jupiterApiKey?: string;
+  onTxSent?: (signature: string) => void;
   onStepProgress?: (step: string, detail?: string) => void;
 }
 
@@ -29,11 +30,16 @@ export interface LiveSellParams {
 
 export interface LiveTradeResult {
   success: boolean;
+  timedOut?: boolean;
   signature?: string;
   explorerUrl?: string;
   actualAmountIn?: number;
   actualAmountOut?: number;
   actualEffectivePriceUsd?: number;
+  baseFeeSol?: number;
+  priorityFeeSol?: number;
+  rentPaidSol?: number;
+  rentReclaimedSol?: number;
   dexFeeUsd?: number;
   gasCostUsd?: number;
   priorityFeeUsd?: number;
@@ -47,17 +53,31 @@ export interface LiveTradeResult {
 let activeTradingKeypair: Keypair | null = null;
 const WSOL_MINT = 'So11111111111111111111111111111111111111112';
 
-// Primary & Fallback Solana RPC Endpoints
-export const SOLANA_RPC_ENDPOINTS = [
+const DEFAULT_SOLANA_RPC_ENDPOINTS = [
   'https://api.mainnet-beta.solana.com',
-  'https://rpc.ankr.com/solana',
   'https://solana-rpc.publicnode.com',
+  'https://rpc.ankr.com/solana',
 ];
+
+export function getSolanaRpcEndpoints(): string[] {
+  const customRaw = (process.env.SOLANA_RPC_URL || '').trim();
+  const customList = customRaw
+    ? customRaw.split(',').map((s) => s.trim()).filter(Boolean)
+    : [];
+  const merged: string[] = [];
+  for (const url of [...customList, ...DEFAULT_SOLANA_RPC_ENDPOINTS]) {
+    if (url && !merged.includes(url)) merged.push(url);
+  }
+  return merged;
+}
+
+export const SOLANA_RPC_ENDPOINTS = getSolanaRpcEndpoints();
 
 let currentRpcIndex = 0;
 
 export function getSolanaConnection(): Connection {
-  const endpoint = SOLANA_RPC_ENDPOINTS[currentRpcIndex] || SOLANA_RPC_ENDPOINTS[0];
+  const endpoints = getSolanaRpcEndpoints();
+  const endpoint = endpoints[currentRpcIndex % endpoints.length] || endpoints[0];
   return new Connection(endpoint, {
     commitment: 'confirmed',
     confirmTransactionInitialTimeout: 30000,
@@ -65,9 +85,31 @@ export function getSolanaConnection(): Connection {
 }
 
 export function rotateSolanaRpc(): Connection {
-  currentRpcIndex = (currentRpcIndex + 1) % SOLANA_RPC_ENDPOINTS.length;
-  console.log(`[RPC_ROTATION] Switched Solana RPC to: ${SOLANA_RPC_ENDPOINTS[currentRpcIndex]}`);
+  const endpoints = getSolanaRpcEndpoints();
+  currentRpcIndex = (currentRpcIndex + 1) % endpoints.length;
+  console.log(`[RPC_ROTATION] Switched Solana RPC to: ${endpoints[currentRpcIndex]}`);
   return getSolanaConnection();
+}
+
+/**
+ * Fetch exact SPL token mint decimals from on-chain mint account (never guess 6).
+ */
+export async function fetchSplMintDecimals(mintAddress: string): Promise<number | null> {
+  try {
+    const pubkey = new PublicKey(mintAddress);
+    for (const ep of getSolanaRpcEndpoints()) {
+      try {
+        const conn = new Connection(ep, { commitment: 'confirmed' });
+        const info = await conn.getParsedAccountInfo(pubkey, 'confirmed');
+        const data: any = info?.value?.data;
+        const decimals = data?.parsed?.info?.decimals;
+        if (typeof decimals === 'number' && Number.isInteger(decimals) && decimals >= 0 && decimals <= 18) {
+          return decimals;
+        }
+      } catch {}
+    }
+  } catch {}
+  return null;
 }
 
 /**
@@ -125,13 +167,19 @@ export function getTradingPublicKey(): string | null {
   return activeTradingKeypair ? activeTradingKeypair.publicKey.toBase58() : null;
 }
 
-export async function getTradingSignerStatus(): Promise<{
+export async function getTradingSignerStatus(
+  solPriceUsdOverride?: number | null,
+  extraStatus?: { encryptedOnDisk?: boolean; locked?: boolean }
+): Promise<{
   configured: boolean;
   address: string | null;
   network: string;
   balanceSol: number;
   balanceUsd: number;
+  solPriceAvailable: boolean;
   readyForLiveTrading: boolean;
+  encryptedOnDisk?: boolean;
+  locked?: boolean;
 }> {
   if (!activeTradingKeypair) {
     return {
@@ -140,30 +188,50 @@ export async function getTradingSignerStatus(): Promise<{
       network: 'mainnet-beta',
       balanceSol: 0,
       balanceUsd: 0,
+      solPriceAvailable: Boolean(solPriceUsdOverride && solPriceUsdOverride > 0),
       readyForLiveTrading: false,
+      ...(extraStatus || {}),
     };
   }
 
   const pubkey = activeTradingKeypair.publicKey;
   let balanceSol = 0;
   let balanceUsd = 0;
+  let solUsd: number | null =
+    solPriceUsdOverride && Number.isFinite(solPriceUsdOverride) && solPriceUsdOverride > 0
+      ? solPriceUsdOverride
+      : null;
 
   try {
     const conn = getSolanaConnection();
     const lamports = await conn.getBalance(pubkey);
     balanceSol = lamports / 1e9;
 
-    // Fetch SOL price
-    try {
-      const pResp = await fetch('https://api.dexscreener.com/latest/dex/tokens/So11111111111111111111111111111111111111112', { signal: AbortSignal.timeout(3000) });
-      if (pResp.ok) {
-        const pData = await pResp.json();
-        const solUsd = parseFloat(pData.pairs?.[0]?.priceUsd || '145');
-        balanceUsd = balanceSol * solUsd;
-      }
-    } catch (_) {
-      balanceUsd = balanceSol * 145.0;
+    if (!solUsd) {
+      try {
+        const pResp = await fetch('https://api.jup.ag/price/v3?ids=So11111111111111111111111111111111111111112', {
+          signal: AbortSignal.timeout(3000),
+        });
+        if (pResp.ok) {
+          const pData = await pResp.json();
+          const parsed = Number(pData?.['So11111111111111111111111111111111111111112']?.usdPrice);
+          if (Number.isFinite(parsed) && parsed > 0) solUsd = parsed;
+        }
+      } catch {}
     }
+    if (!solUsd) {
+      try {
+        const pResp = await fetch('https://api.dexscreener.com/latest/dex/tokens/So11111111111111111111111111111111111111112', {
+          signal: AbortSignal.timeout(3000),
+        });
+        if (pResp.ok) {
+          const pData = await pResp.json();
+          const parsed = parseFloat(pData.pairs?.[0]?.priceUsd || '');
+          if (Number.isFinite(parsed) && parsed > 0) solUsd = parsed;
+        }
+      } catch {}
+    }
+    balanceUsd = solUsd && solUsd > 0 ? balanceSol * solUsd : 0;
   } catch (err) {
     console.warn('Could not fetch balance for trading keypair:', err);
   }
@@ -174,7 +242,9 @@ export async function getTradingSignerStatus(): Promise<{
     network: 'mainnet-beta',
     balanceSol,
     balanceUsd,
+    solPriceAvailable: Boolean(solUsd && solUsd > 0),
     readyForLiveTrading: balanceSol >= 0.01,
+    ...(extraStatus || {}),
   };
 }
 
@@ -303,6 +373,166 @@ export async function buildJupiterSwapTransaction(
   throw new Error(lastErr);
 }
 
+export interface VerifiedTxMetrics {
+  confirmed: boolean;
+  timedOut?: boolean;
+  actualTokensReceived?: number;
+  actualTokensSold?: number;
+  actualSolSpent?: number;
+  actualSolReceived?: number;
+  feeLamports?: number;
+  baseFeeSol?: number;
+  priorityFeeSol?: number;
+  rentPaidSol?: number;
+  rentReclaimedSol?: number;
+  error?: string;
+}
+
+export function parseVerifiedTransactionMetrics(
+  parsedTx: any,
+  targetMint?: string,
+  userPubkey?: string
+): Omit<VerifiedTxMetrics, 'confirmed' | 'timedOut' | 'error'> {
+  let actualTokensReceived: number | undefined;
+  let actualTokensSold: number | undefined;
+  let actualSolSpent: number | undefined;
+  let actualSolReceived: number | undefined;
+  let feeLamports: number | undefined;
+  let baseFeeSol: number | undefined;
+  let priorityFeeSol: number | undefined;
+  let rentPaidSol: number | undefined;
+  let rentReclaimedSol: number | undefined;
+
+  if (!parsedTx || !parsedTx.meta) {
+    return {};
+  }
+
+  feeLamports = Number(parsedTx.meta.fee || 0);
+  const numSigs = Number(parsedTx.transaction?.message?.header?.numRequiredSignatures || 1);
+  const baseLamports = Math.min(feeLamports, 5000 * Math.max(1, numSigs));
+  const priorityLamports = Math.max(0, feeLamports - baseLamports);
+  baseFeeSol = baseLamports / 1e9;
+  priorityFeeSol = priorityLamports / 1e9;
+
+  if (userPubkey) {
+    let rentPaidLamports = 0;
+    let rentReclaimedLamports = 0;
+    const preTokens: any[] = parsedTx.meta.preTokenBalances || [];
+    const postTokens: any[] = parsedTx.meta.postTokenBalances || [];
+    const checkedIdx = new Set<number>();
+
+    for (const pt of [...preTokens, ...postTokens]) {
+      if (pt?.owner !== userPubkey || typeof pt?.accountIndex !== 'number') continue;
+      if (checkedIdx.has(pt.accountIndex)) continue;
+      checkedIdx.add(pt.accountIndex);
+      const preLam = parsedTx.meta.preBalances?.[pt.accountIndex] || 0;
+      const postLam = parsedTx.meta.postBalances?.[pt.accountIndex] || 0;
+      if (preLam === 0 && postLam > 0) {
+        rentPaidLamports += postLam;
+      } else if (preLam > 0 && postLam === 0) {
+        rentReclaimedLamports += preLam;
+      }
+    }
+
+    rentPaidSol = rentPaidLamports / 1e9;
+    rentReclaimedSol = rentReclaimedLamports / 1e9;
+
+    const preWsol = preTokens.find((b) => b.owner === userPubkey && b.mint === WSOL_MINT);
+    const postWsol = postTokens.find((b) => b.owner === userPubkey && b.mint === WSOL_MINT);
+    const wsolDeltaLamports = Math.round(
+      ((postWsol?.uiTokenAmount?.uiAmount || 0) - (preWsol?.uiTokenAmount?.uiAmount || 0)) * 1e9
+    );
+
+    const accountKeys = (parsedTx.transaction?.message?.accountKeys || []).map((k: any) =>
+      typeof k === 'string' ? k : k.pubkey.toBase58()
+    );
+    const userIdx = accountKeys.indexOf(userPubkey);
+    if (userIdx !== -1) {
+      const preLamports = parsedTx.meta.preBalances?.[userIdx] || 0;
+      const postLamports = parsedTx.meta.postBalances?.[userIdx] || 0;
+      const netNativeOutflow = preLamports - postLamports;
+
+      if (netNativeOutflow > 0) {
+        const swapOutLamports = Math.max(
+          0,
+          netNativeOutflow - feeLamports - rentPaidLamports + rentReclaimedLamports - wsolDeltaLamports
+        );
+        actualSolSpent = swapOutLamports / 1e9;
+      } else {
+        const netNativeInflow = postLamports - preLamports;
+        const swapInLamports = Math.max(
+          0,
+          netNativeInflow + feeLamports - rentReclaimedLamports + rentPaidLamports + wsolDeltaLamports
+        );
+        actualSolReceived = swapInLamports / 1e9;
+      }
+    }
+
+    if (targetMint) {
+      const preAmount = preTokens
+        .filter((b) => b.owner === userPubkey && b.mint === targetMint)
+        .reduce((s, b) => s + Number(b?.uiTokenAmount?.uiAmount || 0), 0);
+      const postAmount = postTokens
+        .filter((b) => b.owner === userPubkey && b.mint === targetMint)
+        .reduce((s, b) => s + Number(b?.uiTokenAmount?.uiAmount || 0), 0);
+      const deltaToken = postAmount - preAmount;
+      if (deltaToken > 0) {
+        actualTokensReceived = deltaToken;
+      } else if (deltaToken < 0) {
+        actualTokensSold = Math.abs(deltaToken);
+      }
+    }
+  }
+
+  return {
+    actualTokensReceived,
+    actualTokensSold,
+    actualSolSpent,
+    actualSolReceived,
+    feeLamports,
+    baseFeeSol,
+    priorityFeeSol,
+    rentPaidSol,
+    rentReclaimedSol,
+  };
+}
+
+/**
+ * Single-shot check for a PENDING signature across configured RPC endpoints.
+ */
+export async function checkPendingSignatureStatus(
+  signature: string,
+  targetMint?: string,
+  userPubkey?: string
+): Promise<{ state: 'PENDING' | 'CONFIRMED' | 'FAILED'; metrics?: VerifiedTxMetrics; error?: string }> {
+  for (const ep of getSolanaRpcEndpoints()) {
+    try {
+      const conn = new Connection(ep, { commitment: 'confirmed' });
+      const status = await conn.getSignatureStatus(signature, { searchTransactionHistory: true });
+      if (status?.value) {
+        if (status.value.err) {
+          return { state: 'FAILED', error: `On-chain execution failed: ${JSON.stringify(status.value.err)}` };
+        }
+        if (status.value.confirmationStatus === 'confirmed' || status.value.confirmationStatus === 'finalized') {
+          let parsed: any = null;
+          try {
+            parsed = await conn.getParsedTransaction(signature, {
+              maxSupportedTransactionVersion: 1,
+              commitment: 'confirmed',
+            });
+          } catch {}
+          const metrics = parseVerifiedTransactionMetrics(parsed, targetMint, userPubkey);
+          return {
+            state: 'CONFIRMED',
+            metrics: { confirmed: true, ...metrics },
+          };
+        }
+      }
+    } catch {}
+  }
+  return { state: 'PENDING' };
+}
+
 /**
  * Confirm and verify Solana transaction on-chain
  */
@@ -311,18 +541,11 @@ export async function confirmAndVerifySolanaTransaction(
   connection: Connection,
   targetMint?: string,
   userPubkey?: string
-): Promise<{
-  confirmed: boolean;
-  actualTokensReceived?: number;
-  actualSolSpent?: number;
-  actualSolReceived?: number;
-  feeLamports?: number;
-  error?: string;
-}> {
+): Promise<VerifiedTxMetrics> {
   const startTime = Date.now();
   let confirmed = false;
 
-  // 1. Poll for confirmation
+  // 1. Poll for confirmation up to 35s
   while (Date.now() - startTime < 35000) {
     try {
       const status = await connection.getSignatureStatus(signature, { searchTransactionHistory: true });
@@ -336,74 +559,33 @@ export async function confirmAndVerifySolanaTransaction(
         }
       }
     } catch (_) {}
-    await new Promise(r => setTimeout(r, 1500));
+    await new Promise((r) => setTimeout(r, 1500));
   }
 
   if (!confirmed) {
-    return { confirmed: false, error: 'Transaction confirmation timed out after 35 seconds' };
+    return {
+      confirmed: false,
+      timedOut: true,
+      error: 'Transaction confirmation timed out after 35 seconds (PENDING reconciliation up to 120s)',
+    };
   }
 
-  // 2. Fetch parsed transaction receipt to determine exact on-chain balance deltas
-  let actualTokensReceived: number | undefined;
-  let actualSolSpent: number | undefined;
-  let actualSolReceived: number | undefined;
-  let feeLamports: number | undefined;
-
+  // 2. Fetch parsed transaction receipt to determine exact on-chain balance deltas, fees & rent
   try {
     const parsedTx = await connection.getParsedTransaction(signature, {
       maxSupportedTransactionVersion: 1,
       commitment: 'confirmed',
     });
-
-    if (parsedTx && parsedTx.meta) {
-      feeLamports = parsedTx.meta.fee;
-
-      if (userPubkey) {
-        // Inspect SOL pre/post balances
-        const accountKeys = parsedTx.transaction.message.accountKeys.map(k => (typeof k === 'string' ? k : k.pubkey.toBase58()));
-        const userIdx = accountKeys.indexOf(userPubkey);
-        if (userIdx !== -1) {
-          const preLamports = parsedTx.meta.preBalances[userIdx] || 0;
-          const postLamports = parsedTx.meta.postBalances[userIdx] || 0;
-          const diffLamports = preLamports - postLamports; // positive = spent, negative = received
-
-          if (diffLamports > 0) {
-            actualSolSpent = (diffLamports - (feeLamports || 0)) / 1e9;
-          } else {
-            actualSolReceived = Math.abs(diffLamports) / 1e9;
-          }
-        }
-
-        // Inspect SPL Token pre/post balances for target mint
-        if (targetMint) {
-          const preTokenBal = parsedTx.meta.preTokenBalances?.find(
-            b => b.owner === userPubkey && b.mint === targetMint
-          );
-          const postTokenBal = parsedTx.meta.postTokenBalances?.find(
-            b => b.owner === userPubkey && b.mint === targetMint
-          );
-
-          const preAmount = preTokenBal?.uiTokenAmount?.uiAmount || 0;
-          const postAmount = postTokenBal?.uiTokenAmount?.uiAmount || 0;
-          const deltaToken = postAmount - preAmount;
-
-          if (deltaToken > 0) {
-            actualTokensReceived = deltaToken;
-          }
-        }
-      }
-    }
+    const metrics = parseVerifiedTransactionMetrics(parsedTx, targetMint, userPubkey);
+    return {
+      confirmed: true,
+      ...metrics,
+    };
   } catch (err) {
     console.warn('Could not parse post-trade transaction details:', err);
   }
 
-  return {
-    confirmed: true,
-    actualTokensReceived,
-    actualSolSpent,
-    actualSolReceived,
-    feeLamports,
-  };
+  return { confirmed: true };
 }
 
 /**
@@ -452,6 +634,15 @@ export async function executeLiveSolanaBuy(params: LiveBuyParams): Promise<LiveT
       params.jupiterApiKey
     );
 
+    if (!params.solPriceUsd || params.solPriceUsd <= 0) {
+      return {
+        success: false,
+        error: 'Cannot execute Live BUY: live SOL/USD price unavailable.',
+        timestamp: Date.now(),
+        executionDurationMs: Date.now() - start,
+      };
+    }
+
     const estTokensOut = parseFloat(quote.outAmount) / Math.pow(10, quote.outAmountDecimals || 6);
     notify('BUILDING_TRANSACTION', `Building swap transaction (Route: ${quote.routePlan?.map((r: any) => r.swapInfo?.label || 'DEX').join(' -> ')})...`);
 
@@ -478,6 +669,12 @@ export async function executeLiveSolanaBuy(params: LiveBuyParams): Promise<LiveT
       preflightCommitment: 'confirmed',
     });
 
+    if (params.onTxSent) {
+      try {
+        params.onTxSent(signature);
+      } catch {}
+    }
+
     notify('WAITING_CONFIRMATION', `Confirming transaction signature: ${signature.slice(0, 8)}...`);
 
     // 5. Confirm on-chain and retrieve filled metrics
@@ -491,6 +688,7 @@ export async function executeLiveSolanaBuy(params: LiveBuyParams): Promise<LiveT
     if (!verifyResult.confirmed) {
       return {
         success: false,
+        timedOut: Boolean(verifyResult.timedOut),
         signature,
         explorerUrl: `https://solscan.io/tx/${signature}`,
         error: verifyResult.error || 'Transaction failed during on-chain confirmation.',
@@ -499,10 +697,16 @@ export async function executeLiveSolanaBuy(params: LiveBuyParams): Promise<LiveT
       };
     }
 
-    const solUsd = params.solPriceUsd && params.solPriceUsd > 1 ? params.solPriceUsd : 145.0;
+    const solUsd = params.solPriceUsd;
     const actualTokens = verifyResult.actualTokensReceived || estTokensOut;
-    const actualSolSpent = verifyResult.actualSolSpent || params.tradeAmountSol;
-    const effectivePriceUsd = actualTokens > 0 ? (params.tradeAmountUsd / actualTokens) : (params.tradeAmountUsd / estTokensOut);
+    const actualSolSpent =
+      verifyResult.actualSolSpent !== undefined && verifyResult.actualSolSpent > 0
+        ? verifyResult.actualSolSpent
+        : params.tradeAmountSol;
+    const effectivePriceUsd = actualTokens > 0 ? (actualSolSpent * solUsd) / actualTokens : 0;
+    const baseFeeSol = verifyResult.baseFeeSol ?? 5000 / 1e9;
+    const priorityFeeSol = verifyResult.priorityFeeSol ?? Math.max(0, ((verifyResult.feeLamports || 5000) - 5000) / 1e9);
+    const rentPaidSol = verifyResult.rentPaidSol ?? 0;
 
     notify('BUY_CONFIRMED', `Successfully bought ${actualTokens.toFixed(2)} ${params.tokenSymbol} @ $${effectivePriceUsd.toFixed(8)}!`);
 
@@ -513,8 +717,12 @@ export async function executeLiveSolanaBuy(params: LiveBuyParams): Promise<LiveT
       actualAmountIn: actualSolSpent,
       actualAmountOut: actualTokens,
       actualEffectivePriceUsd: effectivePriceUsd,
-      gasCostUsd: ((verifyResult.feeLamports || 5000) / 1e9) * solUsd,
-      totalFeesUsd: ((verifyResult.feeLamports || 5000) / 1e9) * solUsd,
+      baseFeeSol,
+      priorityFeeSol,
+      rentPaidSol,
+      gasCostUsd: baseFeeSol * solUsd,
+      priorityFeeUsd: priorityFeeSol * solUsd,
+      totalFeesUsd: (baseFeeSol + priorityFeeSol + rentPaidSol) * solUsd,
       timestamp: Date.now(),
       executionDurationMs: Date.now() - start,
     };
@@ -546,13 +754,34 @@ export async function executeLiveSolanaSell(params: LiveSellParams): Promise<Liv
     };
   }
 
+  if (!params.solPriceUsd || params.solPriceUsd <= 0) {
+    return {
+      success: false,
+      error: 'Cannot execute Live SELL: live SOL/USD price unavailable.',
+      timestamp: Date.now(),
+      executionDurationMs: Date.now() - start,
+    };
+  }
+
   const userPubkey = activeTradingKeypair.publicKey.toBase58();
   const conn = getSolanaConnection();
 
   try {
-    notify('FETCHING_TOKEN_BALANCE', `Verifying token account for ${params.tokenSymbol}...`);
-    const decimals = params.tokenDecimals || 6;
-    const rawAmount = Math.floor(params.tokenQuantity * Math.pow(10, decimals));
+    notify('FETCHING_TOKEN_BALANCE', `Verifying token decimals & account for ${params.tokenSymbol}...`);
+    const resolvedDecimals =
+      typeof params.tokenDecimals === 'number' && params.tokenDecimals >= 0
+        ? params.tokenDecimals
+        : await fetchSplMintDecimals(params.tokenAddress);
+    if (resolvedDecimals === null) {
+      return {
+        success: false,
+        error: `Cannot determine on-chain SPL token decimals for ${params.tokenSymbol}.`,
+        timestamp: Date.now(),
+        executionDurationMs: Date.now() - start,
+      };
+    }
+
+    const rawAmount = Math.floor(params.tokenQuantity * Math.pow(10, resolvedDecimals));
 
     if (rawAmount <= 0) {
       return {
@@ -612,6 +841,7 @@ export async function executeLiveSolanaSell(params: LiveSellParams): Promise<Liv
     if (!verifyResult.confirmed) {
       return {
         success: false,
+        timedOut: Boolean(verifyResult.timedOut),
         signature,
         explorerUrl: `https://solscan.io/tx/${signature}`,
         error: verifyResult.error || 'SELL transaction failed during on-chain confirmation.',
@@ -620,21 +850,32 @@ export async function executeLiveSolanaSell(params: LiveSellParams): Promise<Liv
       };
     }
 
-    const solUsd = params.solPriceUsd && params.solPriceUsd > 1 ? params.solPriceUsd : 145.0;
-    const actualSolReceived = verifyResult.actualSolReceived || estSolReceived;
-    const exitPriceUsd = (actualSolReceived * solUsd) / params.tokenQuantity;
+    const solUsd = params.solPriceUsd;
+    const actualSolReceived =
+      verifyResult.actualSolReceived !== undefined ? verifyResult.actualSolReceived : estSolReceived;
+    const actualTokensSold = verifyResult.actualTokensSold || params.tokenQuantity;
+    const exitPriceUsd = actualTokensSold > 0 ? (actualSolReceived * solUsd) / actualTokensSold : 0;
+    const baseFeeSol = verifyResult.baseFeeSol ?? 5000 / 1e9;
+    const priorityFeeSol = verifyResult.priorityFeeSol ?? Math.max(0, ((verifyResult.feeLamports || 5000) - 5000) / 1e9);
+    const rentPaidSol = verifyResult.rentPaidSol ?? 0;
+    const rentReclaimedSol = verifyResult.rentReclaimedSol ?? 0;
 
-    notify('SELL_CONFIRMED', `Successfully sold ${params.tokenQuantity.toFixed(2)} ${params.tokenSymbol} for ${actualSolReceived.toFixed(4)} SOL!`);
+    notify('SELL_CONFIRMED', `Successfully sold ${actualTokensSold.toFixed(2)} ${params.tokenSymbol} for ${actualSolReceived.toFixed(4)} SOL!`);
 
     return {
       success: true,
       signature,
       explorerUrl: `https://solscan.io/tx/${signature}`,
-      actualAmountIn: params.tokenQuantity,
+      actualAmountIn: actualTokensSold,
       actualAmountOut: actualSolReceived,
       actualEffectivePriceUsd: exitPriceUsd,
-      gasCostUsd: ((verifyResult.feeLamports || 5000) / 1e9) * solUsd,
-      totalFeesUsd: ((verifyResult.feeLamports || 5000) / 1e9) * solUsd,
+      baseFeeSol,
+      priorityFeeSol,
+      rentPaidSol,
+      rentReclaimedSol,
+      gasCostUsd: baseFeeSol * solUsd,
+      priorityFeeUsd: priorityFeeSol * solUsd,
+      totalFeesUsd: (baseFeeSol + priorityFeeSol + rentPaidSol) * solUsd,
       timestamp: Date.now(),
       executionDurationMs: Date.now() - start,
     };
@@ -674,13 +915,15 @@ export async function prepareLiveBuyTransaction(params: LiveBuyParams & { userPu
       WSOL_MINT,
       params.tokenAddress,
       amountLamports,
-      params.maxSlippageBps || 150
+      params.maxSlippageBps || 150,
+      params.jupiterApiKey
     );
     const estTokensOut = parseFloat(quote.outAmount) / Math.pow(10, quote.outAmountDecimals || 6);
     const base64Tx = await buildJupiterSwapTransaction(
       quote,
       params.userPublicKey,
-      params.priorityFeeLevel || 'standard'
+      params.priorityFeeLevel || 'standard',
+      params.jupiterApiKey
     );
     return { success: true, base64Tx, estTokensOut };
   } catch (err: any) {
@@ -698,7 +941,13 @@ export async function prepareLiveSellTransaction(params: LiveSellParams & { user
   error?: string;
 }> {
   try {
-    const decimals = params.tokenDecimals || 6;
+    const decimals =
+      typeof params.tokenDecimals === 'number' && params.tokenDecimals >= 0
+        ? params.tokenDecimals
+        : await fetchSplMintDecimals(params.tokenAddress);
+    if (decimals === null) {
+      return { success: false, error: 'Could not determine on-chain SPL token decimals for selling' };
+    }
     const rawAmount = Math.floor(params.tokenQuantity * Math.pow(10, decimals));
     if (rawAmount <= 0) {
       return { success: false, error: 'Invalid token quantity for selling' };
@@ -707,13 +956,15 @@ export async function prepareLiveSellTransaction(params: LiveSellParams & { user
       params.tokenAddress,
       WSOL_MINT,
       rawAmount,
-      params.maxSlippageBps || 200
+      params.maxSlippageBps || 200,
+      params.jupiterApiKey
     );
     const estSolReceived = parseFloat(quote.outAmount) / 1e9;
     const base64Tx = await buildJupiterSwapTransaction(
       quote,
       params.userPublicKey,
-      params.priorityFeeLevel || 'high'
+      params.priorityFeeLevel || 'high',
+      params.jupiterApiKey
     );
     return { success: true, base64Tx, estSolReceived };
   } catch (err: any) {
@@ -747,6 +998,7 @@ export async function finalizeBrowserSignedTransaction(params: {
   if (!verifyResult.confirmed) {
     return {
       success: false,
+      timedOut: Boolean(verifyResult.timedOut),
       signature: params.signature,
       explorerUrl: `https://solscan.io/tx/${params.signature}`,
       error: verifyResult.error || 'Transaction confirmation failed.',
@@ -754,35 +1006,53 @@ export async function finalizeBrowserSignedTransaction(params: {
       executionDurationMs: Date.now() - start,
     };
   }
-  const solUsd = params.solPriceUsd || 145;
+  const solUsd = params.solPriceUsd && params.solPriceUsd > 0 ? params.solPriceUsd : 0;
+  const baseFeeSol = verifyResult.baseFeeSol ?? 5000 / 1e9;
+  const priorityFeeSol = verifyResult.priorityFeeSol ?? Math.max(0, ((verifyResult.feeLamports || 5000) - 5000) / 1e9);
+  const rentPaidSol = verifyResult.rentPaidSol ?? 0;
+  const rentReclaimedSol = verifyResult.rentReclaimedSol ?? 0;
+
   if (params.isBuy) {
     const actualTokens = verifyResult.actualTokensReceived || params.estTokensOut || 1;
-    const actualSol = verifyResult.actualSolSpent || params.tradeAmountSol || 0;
-    const usd = params.tradeAmountUsd || actualSol * solUsd;
+    const actualSol =
+      verifyResult.actualSolSpent !== undefined && verifyResult.actualSolSpent > 0
+        ? verifyResult.actualSolSpent
+        : params.tradeAmountSol || 0;
+    const entryPriceUsd = actualTokens > 0 && solUsd > 0 ? (actualSol * solUsd) / actualTokens : 0;
     return {
       success: true,
       signature: params.signature,
       explorerUrl: `https://solscan.io/tx/${params.signature}`,
       actualAmountIn: actualSol,
       actualAmountOut: actualTokens,
-      actualEffectivePriceUsd: actualTokens > 0 ? usd / actualTokens : 0,
-      gasCostUsd: ((verifyResult.feeLamports || 5000) / 1e9) * solUsd,
-      totalFeesUsd: ((verifyResult.feeLamports || 5000) / 1e9) * solUsd,
+      actualEffectivePriceUsd: entryPriceUsd,
+      baseFeeSol,
+      priorityFeeSol,
+      rentPaidSol,
+      gasCostUsd: baseFeeSol * solUsd,
+      priorityFeeUsd: priorityFeeSol * solUsd,
+      totalFeesUsd: (baseFeeSol + priorityFeeSol + rentPaidSol) * solUsd,
       timestamp: Date.now(),
       executionDurationMs: Date.now() - start,
     };
   }
-  const actualSol = verifyResult.actualSolReceived || params.estSolReceived || 0;
-  const qty = params.tokenQuantity || 1;
+  const actualSol =
+    verifyResult.actualSolReceived !== undefined ? verifyResult.actualSolReceived : params.estSolReceived || 0;
+  const qty = verifyResult.actualTokensSold || params.tokenQuantity || 1;
   return {
     success: true,
     signature: params.signature,
     explorerUrl: `https://solscan.io/tx/${params.signature}`,
     actualAmountIn: qty,
     actualAmountOut: actualSol,
-    actualEffectivePriceUsd: qty > 0 ? (actualSol * solUsd) / qty : 0,
-    gasCostUsd: ((verifyResult.feeLamports || 5000) / 1e9) * solUsd,
-    totalFeesUsd: ((verifyResult.feeLamports || 5000) / 1e9) * solUsd,
+    actualEffectivePriceUsd: qty > 0 && solUsd > 0 ? (actualSol * solUsd) / qty : 0,
+    baseFeeSol,
+    priorityFeeSol,
+    rentPaidSol,
+    rentReclaimedSol,
+    gasCostUsd: baseFeeSol * solUsd,
+    priorityFeeUsd: priorityFeeSol * solUsd,
+    totalFeesUsd: (baseFeeSol + priorityFeeSol + rentPaidSol) * solUsd,
     timestamp: Date.now(),
     executionDurationMs: Date.now() - start,
   };
@@ -794,6 +1064,8 @@ export interface ExternalSellLookupResult {
   explorerUrl?: string;
   actualSolReceived?: number;
   ataRentReclaimedSol?: number;
+  baseFeeSol?: number;
+  priorityFeeSol?: number;
   tokensSold?: number;
   blockTimeMs?: number;
 }
@@ -809,7 +1081,7 @@ export async function findExternalSellOnChain(
 ): Promise<ExternalSellLookupResult> {
   try {
     const pubkey = new PublicKey(ownerPubkey);
-    for (const endpoint of SOLANA_RPC_ENDPOINTS) {
+    for (const endpoint of getSolanaRpcEndpoints()) {
       try {
         const conn = new Connection(endpoint, { commitment: 'confirmed' });
         const sigs = await conn.getSignaturesForAddress(pubkey, { limit: 25 });
@@ -838,44 +1110,16 @@ export async function findExternalSellOnChain(
           const soldAmt = preAmt - postAmt;
           if (soldAmt <= 0 || (postAmt > 0.000001 && soldAmt < preAmt * 0.8)) continue;
 
-          const keys = parsed.transaction.message.accountKeys.map((k) =>
-            typeof k === 'string' ? k : k.pubkey.toBase58()
-          );
-          const idx = keys.indexOf(ownerPubkey);
-          if (idx === -1) continue;
-
-          const preLamports = parsed.meta.preBalances[idx] || 0;
-          const postLamports = parsed.meta.postBalances[idx] || 0;
-          let solDelta = (postLamports - preLamports) / 1e9;
-
-          const preWsol = (parsed.meta.preTokenBalances || []).find(
-            (b) => b.owner === ownerPubkey && b.mint === WSOL_MINT
-          );
-          const postWsol = (parsed.meta.postTokenBalances || []).find(
-            (b) => b.owner === ownerPubkey && b.mint === WSOL_MINT
-          );
-          const wsolDelta =
-            (postWsol?.uiTokenAmount?.uiAmount || 0) - (preWsol?.uiTokenAmount?.uiAmount || 0);
-          if (wsolDelta > 0) solDelta += wsolDelta;
-
-          // If the token ATA itself was closed in this same tx, exclude its refunded rent from trade PnL
-          let ataRentReclaimedSol = 0;
-          const tokAccIdx = preTok.accountIndex;
-          if (
-            typeof tokAccIdx === 'number' &&
-            (parsed.meta.preBalances?.[tokAccIdx] || 0) > 0 &&
-            (parsed.meta.postBalances?.[tokAccIdx] || 0) === 0
-          ) {
-            ataRentReclaimedSol = (parsed.meta.preBalances[tokAccIdx] || 0) / 1e9;
-          }
-
-          if (solDelta > 0) {
+          const metrics = parseVerifiedTransactionMetrics(parsed, mint, ownerPubkey);
+          if ((metrics.actualSolReceived ?? 0) > 0) {
             return {
               found: true,
               signature: s.signature,
               explorerUrl: `https://solscan.io/tx/${s.signature}`,
-              actualSolReceived: Math.max(0, solDelta - ataRentReclaimedSol),
-              ataRentReclaimedSol,
+              actualSolReceived: metrics.actualSolReceived,
+              ataRentReclaimedSol: metrics.rentReclaimedSol,
+              baseFeeSol: metrics.baseFeeSol,
+              priorityFeeSol: metrics.priorityFeeSol,
               tokensSold: soldAmt,
               blockTimeMs: s.blockTime ? s.blockTime * 1000 : undefined,
             };

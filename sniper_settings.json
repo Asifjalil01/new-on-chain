@@ -2,7 +2,7 @@
   "start_balance_usd": 50,
   "start_balance_sol": 0.3448,
   "trade_size_usd": 5,
-  "trade_size_sol": 0.035,
+  "trade_size_sol": 0.02,
   "max_open_positions": 3,
   "daily_loss_limit_usd": 10,
   "daily_loss_limit_sol": 0.069,
@@ -41,7 +41,7 @@
   "DEFAULT_CHAIN": "solana",
   "MAX_POSITION_SIZE_USD": 100,
   "MAX_POSITION_SIZE_SOL": 0.6897,
-  "MIN_GAS_RESERVE_SOL": 0.01,
+  "MIN_GAS_RESERVE_SOL": 0.002,
   "MIN_GAS_RESERVE_ETH": 0.005,
   "PRIORITY_FEE_LEVEL": "standard",
   "THEME": "dark"

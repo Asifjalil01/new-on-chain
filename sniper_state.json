@@ -1,13 +1,50 @@
 {
   "paper": {
-    "cash": 50,
-    "positions": {},
-    "day": "2026-11-13",
-    "day_pnl": 0,
-    "total_pnl": 0,
-    "closed": 0,
+    "cash": 37.21282473581996,
+    "positions": {
+      "3vEUuLxADruQRArAe5jMmhweHn1gp7zQs4Yp6aLSebfx": {
+        "symbol": "INTERVIEW",
+        "qty": 612618.0759460772,
+        "entry_price": 8.080075e-06,
+        "cost": 5.0,
+        "cost_unit": "USD",
+        "opened": 1794671922.0975716,
+        "url": "https://dexscreener.com/solana/2xqy6smcgszh37smjcqufktcoszvma6bfq4jifmrst1d",
+        "peak_price": 8.080075e-06,
+        "low_price": 8.080075e-06,
+        "tp_reached": false,
+        "dex": "meteora",
+        "source": "gecko",
+        "age_at_entry": 119.9,
+        "is_live": false
+      },
+      "8TEJNxUpmof6X2hesnB2FLERkuTRbMGZFtYvDLNfDAX5": {
+        "symbol": "Epsteinlon",
+        "qty": 603055.4811042617,
+        "entry_price": 8.208199999999999e-06,
+        "cost": 5.0,
+        "cost_unit": "USD",
+        "opened": 1794672596.909296,
+        "url": "https://dexscreener.com/solana/9xkfpjpdxziawqfbajz9rdyeepk6xqmeunwxftz64kix",
+        "peak_price": 8.208199999999999e-06,
+        "low_price": 8.208199999999999e-06,
+        "tp_reached": false,
+        "dex": "meteora",
+        "source": "jup",
+        "age_at_entry": 57.8,
+        "is_live": false
+      }
+    },
+    "day": "2026-11-14",
+    "day_pnl": -2.7871752641800422,
+    "total_pnl": -2.7871752641800422,
+    "closed": 1,
     "wins": 0,
-    "blacklist": [],
+    "blacklist": [
+      "nJfNcXnetXRrbKu3b78yg7PFswvFZSrAu6rqFPqEuVK",
+      "3vEUuLxADruQRArAe5jMmhweHn1gp7zQs4Yp6aLSebfx",
+      "8TEJNxUpmof6X2hesnB2FLERkuTRbMGZFtYvDLNfDAX5"
+    ],
     "trades": []
   },
   "testnet": {

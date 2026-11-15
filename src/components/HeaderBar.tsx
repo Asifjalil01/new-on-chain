@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from 'react';
-import { Wallet, Lock, Sun, Moon, Play, Square } from 'lucide-react';
+import { Wallet, Lock, Sun, Moon, Play, Square, OctagonAlert, AlertTriangle } from 'lucide-react';
 import { useBot } from '../context/BotContext';
 
 export const HeaderBar: React.FC = () => {
@@ -12,13 +12,18 @@ export const HeaderBar: React.FC = () => {
     signerStatus,
     setIsWalletModalOpen,
     requestModeChange,
+    setIsLiveConfirmOpen,
+    riskChangedSinceLiveConfirm,
     theme,
     toggleTheme,
     isBotStopped,
     handleStartStop,
+    handleKillSwitch,
   } = useBot();
 
   const [nowMs, setNowMs] = useState(() => Date.now());
+  const [killing, setKilling] = useState(false);
+
   useEffect(() => {
     if (isBotStopped) return;
     const t = setInterval(() => setNowMs(Date.now()), 500);
@@ -44,6 +49,7 @@ export const HeaderBar: React.FC = () => {
     ? signerStatus.balanceSol
     : null;
   const connectedLiveSymbol = browserWalletConnected ? activeWallet.nativeSymbol : 'SOL';
+  const solPriceUsd = Number(status?.sol_price_usd || 0);
 
   const priceAgeSec = botStatus.last_price_time
     ? Math.max(0, (nowMs - botStatus.last_price_time) / 1000)
@@ -65,6 +71,16 @@ export const HeaderBar: React.FC = () => {
     }
   }
 
+  const onKillClick = async () => {
+    if (killing) return;
+    setKilling(true);
+    try {
+      await handleKillSwitch();
+    } finally {
+      setKilling(false);
+    }
+  };
+
   return (
     <header className="bg-[var(--bg)] border-b border-[var(--border)] px-5 py-3 flex flex-wrap items-center justify-between gap-4 shrink-0">
       {/* Left: Brand Title & Unboxed Subtitle */}
@@ -74,14 +90,14 @@ export const HeaderBar: React.FC = () => {
         </h1>
         <p className="text-xs text-[var(--dim)] mt-0.5 whitespace-nowrap">
           {isLive
-            ? 'All DEXes · brand-new coins only · hard rug screen · LIVE MODE (real SOL)'
+            ? `All DEXes · ${config.min_age_minutes ?? 30}m–${config.max_age_minutes ?? 720}m age window · fail-closed checks · LIVE MODE`
             : isTestnet
-            ? 'All DEXes · brand-new coins only · hard rug screen · TESTNET MODE'
-            : 'All DEXes · brand-new coins only · hard rug screen · PAPER MODE (no real money)'}
+            ? `All DEXes · ${config.min_age_minutes ?? 30}m–${config.max_age_minutes ?? 720}m age window · TESTNET MODE`
+            : `All DEXes · ${config.min_age_minutes ?? 30}m–${config.max_age_minutes ?? 720}m age window · PAPER MODE (no real money)`}
         </p>
       </div>
 
-      {/* Right: Mode Switcher, Wallet, Status Readout, Start/Stop CTA, Theme Toggle */}
+      {/* Right: Mode Switcher, Wallet, Status Readout, Start/Stop + Kill Switch CTA, Theme Toggle */}
       <div className="flex items-center gap-3 flex-wrap shrink-0">
         {/* Mode Switcher */}
         <div
@@ -125,35 +141,52 @@ export const HeaderBar: React.FC = () => {
           </button>
         </div>
 
+        {/* Re-confirm Risk Alert if SL/TP modified in Live mode */}
+        {riskChangedSinceLiveConfirm && (
+          <button
+            type="button"
+            onClick={() => setIsLiveConfirmOpen(true)}
+            className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg border border-[var(--orange)] bg-[var(--orange)]/15 text-[var(--orange)] text-xs font-bold cursor-pointer hover:brightness-110 whitespace-nowrap"
+            title="Stop-loss or take-profit changed since your last Live confirm"
+          >
+            <AlertTriangle size={13} />
+            <span>Re-confirm SL/TP</span>
+          </button>
+        )}
+
         {/* Wallet / Desktop Signer Button */}
         <button
           type="button"
           onClick={() => setIsWalletModalOpen(true)}
           className={`flex items-center gap-2 px-3 py-1.5 rounded-lg border text-xs font-semibold transition-colors cursor-pointer whitespace-nowrap shrink-0 ${
-            isLive && !connectedLiveAddress
+            isLive && !signerConnected
               ? 'border-[var(--red)] bg-[var(--red)]/10 text-[var(--red)]'
               : 'border-[var(--border-bright)] bg-[var(--card)] text-[var(--text)] hover:border-[var(--teal)]'
           }`}
           title={
             connectedLiveAddress
-              ? `${browserWalletConnected ? activeWallet.name : 'Desktop Live Signer'}: ${connectedLiveAddress}`
-              : 'Connect Phantom / Import Desktop Signer Key'
+              ? `${browserWalletConnected ? activeWallet.name : 'Server Live Signer'}: ${connectedLiveAddress}`
+              : 'Configure Server Signer / Connect Wallet'
           }
         >
           <Wallet size={14} className={isLive ? 'text-[var(--red)]' : 'text-[var(--teal)]'} />
           <span>
-            {browserWalletConnected && connectedLiveAddress
-              ? `${activeWallet.name.split(' ')[0]} · ${connectedLiveAddress.slice(0, 4)}...${connectedLiveAddress.slice(-4)}`
-              : connectedLiveAddress
+            {signerConnected && !browserWalletConnected && connectedLiveAddress
               ? `Signer · ${connectedLiveAddress.slice(0, 4)}...${connectedLiveAddress.slice(-4)}`
+              : browserWalletConnected && connectedLiveAddress
+              ? `${activeWallet.name.split(' ')[0]} · ${connectedLiveAddress.slice(0, 4)}...${connectedLiveAddress.slice(-4)}`
+              : signerStatus?.locked
+              ? 'Signer Locked'
               : isLive
-              ? 'Connect Wallet'
-              : 'Phantom / Keypair'}
+              ? 'Signer Required'
+              : 'Signer / Wallet'}
           </span>
           {connectedLiveBalanceSol !== null && (
             <span className="font-mono text-[var(--muted)] border-l border-[var(--border)] pl-2 tabular-nums">
               {connectedLiveBalanceSol.toFixed(4)} {connectedLiveSymbol}
-              {status?.sol_price_usd ? ` ($${(connectedLiveBalanceSol * Number(status.sol_price_usd)).toFixed(2)})` : ''}
+              {solPriceUsd > 0
+                ? ` ($${(connectedLiveBalanceSol * solPriceUsd).toFixed(2)})`
+                : ' (price unavailable)'}
             </span>
           )}
         </button>
@@ -167,7 +200,7 @@ export const HeaderBar: React.FC = () => {
         <button
           type="button"
           onClick={handleStartStop}
-          className={`px-5 py-2 rounded-lg text-sm font-bold text-white flex items-center gap-2 cursor-pointer transition-colors whitespace-nowrap shrink-0 ${
+          className={`px-4 py-2 rounded-lg text-sm font-bold text-white flex items-center gap-2 cursor-pointer transition-colors whitespace-nowrap shrink-0 ${
             isBotStopped
               ? 'bg-[var(--green)] hover:brightness-110'
               : 'bg-[var(--red)] hover:brightness-110'
@@ -175,6 +208,18 @@ export const HeaderBar: React.FC = () => {
         >
           {isBotStopped ? <Play size={14} /> : <Square size={14} />}
           <span>{isBotStopped ? 'Start bot' : 'Stop bot'}</span>
+        </button>
+
+        {/* Emergency Kill Switch */}
+        <button
+          type="button"
+          onClick={onKillClick}
+          disabled={killing}
+          title="Emergency Kill Switch: immediately stop bot and attempt to exit all open positions"
+          className="px-3 py-2 rounded-lg border border-[var(--red)] bg-[var(--red)]/15 hover:bg-[var(--red)] hover:text-white text-xs font-bold text-[var(--red)] flex items-center gap-1.5 cursor-pointer transition-colors whitespace-nowrap shrink-0 disabled:opacity-50"
+        >
+          <OctagonAlert size={14} />
+          <span>{killing ? 'Killing...' : 'Kill switch'}</span>
         </button>
 
         {/* Theme Toggle */}

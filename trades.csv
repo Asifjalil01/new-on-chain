@@ -1,0 +1,5 @@
+time,action,symbol,mint,price,amount,pnl,pnl_pct,reason,explorer,age_s,dex,mode
+2026-11-14T15:58:41.043287+00:00,BUY,Mixkoi,nJfNcXnetXRrbKu3b78yg7PFswvFZSrAu6rqFPqEuVK,0.0000131302,$5.00,,,paper_entry,https://dexscreener.com/solana/aydfsfkv66nk2dgkh3omdj6wv7nt5j2upr5lw3evkyjh,114.851,meteora,paper
+2026-11-14T15:58:42.097584+00:00,BUY,INTERVIEW,3vEUuLxADruQRArAe5jMmhweHn1gp7zQs4Yp6aLSebfx,0.0000080801,$5.00,,,paper_entry,https://dexscreener.com/solana/2xqy6smcgszh37smjcqufktcoszvma6bfq4jifmrst1d,119.851,meteora,paper
+2026-11-14T16:09:56.909307+00:00,BUY,Epsteinlon,8TEJNxUpmof6X2hesnB2FLERkuTRbMGZFtYvDLNfDAX5,0.0000082082,$5.00,,,paper_entry,https://dexscreener.com/solana/9xkfpjpdxziawqfbajz9rdyeepk6xqmeunwxftz64kix,57.83,meteora,paper
+2026-11-14T16:09:57.383713+00:00,SELL,Mixkoi,nJfNcXnetXRrbKu3b78yg7PFswvFZSrAu6rqFPqEuVK,0.0000059290,$2.21,-2.7872,-55.74,stop_loss_-35%,https://dexscreener.com/solana/aydfsfkv66nk2dgkh3omdj6wv7nt5j2upr5lw3evkyjh,,,paper

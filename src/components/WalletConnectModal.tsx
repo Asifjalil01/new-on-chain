@@ -25,7 +25,7 @@ export const WalletConnectModal: React.FC<WalletConnectModalProps> = ({
   onClose,
   onWalletSelected,
 }) => {
-  const { signerStatus, saveTradingSigner, clearTradingSigner } = useBot();
+  const { signerStatus, saveTradingSigner, unlockTradingSigner, clearTradingSigner } = useBot();
   const [wallets, setWallets] = useState<WalletInfo[]>(walletManager.getAllWallets());
   const [activeWallet, setActiveWallet] = useState<WalletInfo>(walletManager.getActiveWallet());
   const [loadingId, setLoadingId] = useState<WalletId | null>(null);
@@ -37,8 +37,10 @@ export const WalletConnectModal: React.FC<WalletConnectModalProps> = ({
     Boolean(window.phantom?.solana || window.solana?.isPhantom || window.solflare?.isSolflare);
 
   // Desktop / local keypair signer input
-  const [showKeypairBox, setShowKeypairBox] = useState<boolean>(isDesktop || !hasBrowserSolana);
+  const [showKeypairBox, setShowKeypairBox] = useState<boolean>(isDesktop || !hasBrowserSolana || Boolean(signerStatus?.locked));
   const [signerKeyInput, setSignerKeyInput] = useState<string>('');
+  const [signerPassphrase, setSignerPassphrase] = useState<string>('');
+  const [unlockPassphrase, setUnlockPassphrase] = useState<string>('');
   const [signerBusy, setSignerBusy] = useState<boolean>(false);
   const [signerNotice, setSignerNotice] = useState<string | null>(null);
 
@@ -71,7 +73,7 @@ export const WalletConnectModal: React.FC<WalletConnectModalProps> = ({
         const target = walletManager.getAllWallets().find((w) => w.id === walletId);
         setErrorMessage(
           target?.errorReason ||
-            `Could not connect to ${walletId.toUpperCase()}. In desktop mode, use the Desktop Signer keypair section below.`
+            `Could not connect to ${walletId.toUpperCase()}. Use the Server Live Signer section below.`
         );
       }
     } finally {
@@ -107,12 +109,40 @@ export const WalletConnectModal: React.FC<WalletConnectModalProps> = ({
     setErrorMessage(null);
     setSignerNotice(null);
     try {
-      const res = await saveTradingSigner(signerKeyInput.trim());
+      const res = await saveTradingSigner(
+        signerKeyInput.trim(),
+        signerPassphrase.trim() || undefined
+      );
       if (res.success) {
+        const encrypted = signerPassphrase.trim().length > 0;
         setSignerKeyInput('');
-        setSignerNotice('Desktop Live Signer connected in local engine memory.');
+        setSignerPassphrase('');
+        setSignerNotice(
+          encrypted
+            ? 'Server Live Signer connected and encrypted on disk (.sniper_signer.key).'
+            : 'Server Live Signer connected in process memory only (not written to disk).'
+        );
       } else {
         setErrorMessage(res.error || 'Invalid Solana private key.');
+      }
+    } finally {
+      setSignerBusy(false);
+    }
+  };
+
+  const handleUnlockSigner = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!unlockPassphrase.trim()) return;
+    setSignerBusy(true);
+    setErrorMessage(null);
+    setSignerNotice(null);
+    try {
+      const res = await unlockTradingSigner(unlockPassphrase.trim());
+      if (res.success) {
+        setUnlockPassphrase('');
+        setSignerNotice('Encrypted Server Live Signer unlocked.');
+      } else {
+        setErrorMessage(res.error || 'Invalid passphrase.');
       }
     } finally {
       setSignerBusy(false);
@@ -124,7 +154,7 @@ export const WalletConnectModal: React.FC<WalletConnectModalProps> = ({
     setSignerNotice(null);
     try {
       const ok = await clearTradingSigner();
-      if (ok) setSignerNotice('Desktop Live Signer cleared.');
+      if (ok) setSignerNotice('Server Live Signer cleared from memory and disk.');
     } finally {
       setSignerBusy(false);
     }
@@ -179,7 +209,7 @@ export const WalletConnectModal: React.FC<WalletConnectModalProps> = ({
         <div className="p-3 bg-[var(--panel)]/60 border-b border-[var(--border)] flex items-start gap-2.5 text-[11px] text-[var(--muted)] shrink-0">
           <ShieldCheck size={16} className="text-[var(--teal)] shrink-0 mt-0.5" />
           <span>
-            Real on-chain balance verification. Local desktop signer keypairs are held strictly in local process memory for autonomous swap signing and never sent externally.
+            Live Start requires a server-side trading signer so stop-loss and rug exits do not depend on 65s Phantom browser popups. Keypairs are held in local memory (or AES-256-GCM encrypted on disk when a passphrase is provided).
           </span>
         </div>
 
@@ -203,33 +233,59 @@ export const WalletConnectModal: React.FC<WalletConnectModalProps> = ({
               className="flex items-center gap-2 text-[11px] font-bold text-[var(--teal)] cursor-pointer hover:underline"
             >
               <KeyRound size={14} />
-              <span>
-                {isDesktop
-                  ? 'Desktop Live Signer (Import Phantom Private Key — No Browser Extension Needed)'
-                  : 'Autonomous Keypair Signer (For Desktop App / Unattended Live Mode)'}
-              </span>
+              <span>Server-Side Live Signer (Required for Live Mode Exits)</span>
             </button>
-            {signerStatus?.configured && signerStatus?.address && (
+            {signerStatus?.configured && signerStatus?.address ? (
               <span className="text-[10px] px-1.5 py-0.5 rounded bg-[var(--green)]/15 text-[var(--green)] font-bold">
                 CONNECTED: {signerStatus.address.slice(0, 4)}...{signerStatus.address.slice(-4)} (
                 {(signerStatus.balanceSol ?? 0).toFixed(4)} SOL)
               </span>
-            )}
+            ) : signerStatus?.locked ? (
+              <span className="text-[10px] px-1.5 py-0.5 rounded bg-[var(--orange)]/15 text-[var(--orange)] font-bold">
+                LOCKED (ENCRYPTED)
+              </span>
+            ) : null}
           </div>
 
           {signerNotice && (
             <div className="text-[11px] text-[var(--green)] font-semibold">{signerNotice}</div>
           )}
 
+          {signerStatus?.locked && (
+            <form onSubmit={handleUnlockSigner} className="flex items-center gap-2 pt-1">
+              <input
+                type="password"
+                value={unlockPassphrase}
+                onChange={(e) => setUnlockPassphrase(e.target.value)}
+                placeholder="Passphrase to unlock encrypted .sniper_signer.key..."
+                className="flex-1 bg-[var(--card)] border border-[var(--orange)] rounded px-2.5 py-1.5 text-xs text-[var(--text)] font-mono focus:outline-none"
+              />
+              <button
+                type="submit"
+                disabled={signerBusy || !unlockPassphrase.trim()}
+                className="px-3 py-1.5 rounded bg-[var(--orange)] text-white font-bold text-xs hover:brightness-110 disabled:opacity-50 cursor-pointer shrink-0"
+              >
+                {signerBusy ? 'UNLOCKING...' : 'UNLOCK'}
+              </button>
+            </form>
+          )}
+
           {showKeypairBox && (
             <form onSubmit={handleSaveDesktopSigner} className="space-y-2 pt-1">
-              <div className="flex items-center gap-2">
+              <div className="flex flex-wrap items-center gap-2">
                 <input
                   type="password"
                   value={signerKeyInput}
                   onChange={(e) => setSignerKeyInput(e.target.value)}
-                  placeholder="Paste Phantom Base58 private key or [byte array]..."
-                  className="flex-1 bg-[var(--card)] border border-[var(--border-bright)] rounded px-2.5 py-1.5 text-xs text-[var(--text)] font-mono focus:border-[var(--teal)] focus:outline-none"
+                  placeholder="Paste Base58 private key or [byte array]..."
+                  className="flex-1 min-w-[200px] bg-[var(--card)] border border-[var(--border-bright)] rounded px-2.5 py-1.5 text-xs text-[var(--text)] font-mono focus:border-[var(--teal)] focus:outline-none"
+                />
+                <input
+                  type="password"
+                  value={signerPassphrase}
+                  onChange={(e) => setSignerPassphrase(e.target.value)}
+                  placeholder="Optional passphrase"
+                  className="w-40 bg-[var(--card)] border border-[var(--border-bright)] rounded px-2.5 py-1.5 text-xs text-[var(--text)] font-mono focus:border-[var(--teal)] focus:outline-none"
                 />
                 <button
                   type="submit"
@@ -238,13 +294,13 @@ export const WalletConnectModal: React.FC<WalletConnectModalProps> = ({
                 >
                   {signerBusy ? 'SAVING...' : 'CONNECT SIGNER'}
                 </button>
-                {signerStatus?.configured && (
+                {(signerStatus?.configured || signerStatus?.encryptedOnDisk) && (
                   <button
                     type="button"
                     disabled={signerBusy}
                     onClick={handleClearDesktopSigner}
                     className="px-2.5 py-1.5 rounded border border-[var(--red)]/40 bg-[var(--red)]/10 text-[var(--red)] hover:bg-[var(--red)]/20 cursor-pointer shrink-0 flex items-center gap-1"
-                    title="Clear Desktop Signer"
+                    title="Clear Server Signer"
                   >
                     <Trash2 size={12} />
                     <span>CLEAR</span>
@@ -252,7 +308,7 @@ export const WalletConnectModal: React.FC<WalletConnectModalProps> = ({
                 )}
               </div>
               <p className="text-[10px] text-[var(--dim)]">
-                Because desktop windows do not run Chrome extensions, paste your Phantom trading wallet private key here to execute real Live SOL swaps directly from the desktop software.
+                With a passphrase, the key is stored encrypted (AES-256-GCM) in .sniper_signer.key. Without a passphrase, it stays strictly in memory.
               </p>
             </form>
           )}

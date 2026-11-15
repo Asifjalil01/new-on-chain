@@ -1,10 +1,20 @@
 import React, { createContext, useContext, useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import { walletManager, WalletInfo, WalletId } from '../wallets/WalletManager';
+import { apiFetch } from '../utils/api';
 
 export type SniperTabId = 'open_positions' | 'trade_history' | 'scan_log' | 'settings' | 'wallets';
 export type ExecutionMode = 'paper' | 'testnet' | 'live';
 
+export interface PositionExitParams {
+  take_profit_pct: number;
+  stop_loss_pct: number;
+  trailing_stop_pct: number;
+  rug_exit_drop_pct: number;
+  max_hold_minutes: number;
+}
+
 export interface PositionRow {
+  trade_id?: string;
   mint: string;
   symbol: string;
   entry: number;
@@ -26,10 +36,24 @@ export interface PositionRow {
   tx_hash_buy?: string;
   explorer_url?: string;
   mode: ExecutionMode;
+  exit_params?: PositionExitParams;
+  needs_review?: boolean;
+  needs_review_reason?: string;
+}
+
+export interface PendingBuyRow {
+  mint: string;
+  symbol: string;
+  signature: string;
+  startedAt: number;
+  expiresAt: number;
+  tradeSol: number;
+  status: string;
 }
 
 export interface SniperTradeRow {
   id: string;
+  trade_id?: string;
   mode: ExecutionMode;
   time: string;
   action: 'BUY' | 'SELL';
@@ -38,9 +62,17 @@ export interface SniperTradeRow {
   price: number;
   usd: number;
   sol_amount?: number;
+  sol_spent?: number | null;
+  sol_received?: number | null;
+  base_fee_sol?: number | null;
+  priority_fee_sol?: number | null;
+  rent_paid_sol?: number | null;
   pnl_usd: number | null;
   pnl_sol?: number | null;
+  net_pnl_sol?: number | null;
+  net_pnl_usd?: number | null;
   pnl_pct: number | null;
+  estimated?: boolean;
   reason: string;
   dexscreener: string;
   age_s?: number;
@@ -63,7 +95,8 @@ export interface SniperLog {
 
 export interface PortfolioStats {
   mode: ExecutionMode;
-  sol_price_usd?: number;
+  sol_price_usd?: number | null;
+  sol_price_available?: boolean;
   cash: number;
   cash_sol?: number;
   value: number;
@@ -79,6 +112,7 @@ export interface PortfolioStats {
   win_rate_pct: number;
   winrate: string;
   open_positions_count: number;
+  pending_buys_count?: number;
   day: string;
 }
 
@@ -96,6 +130,9 @@ export interface SignerStatus {
   address: string | null;
   balanceSol?: number;
   balanceUsd?: number;
+  solPriceAvailable?: boolean;
+  encryptedOnDisk?: boolean;
+  locked?: boolean;
 }
 
 export interface BotContextType {
@@ -121,6 +158,7 @@ export interface BotContextType {
 
   // Data Collections
   positions: PositionRow[];
+  pendingBuys: PendingBuyRow[];
   trades: SniperTradeRow[];
   logs: SniperLog[];
   wallets: any[];
@@ -141,12 +179,14 @@ export interface BotContextType {
   disconnectWallet: (id: WalletId) => void;
   refreshWalletBalance: () => Promise<void>;
   refreshSignerStatus: () => Promise<void>;
-  saveTradingSigner: (secretKey: string) => Promise<{ success: boolean; error?: string }>;
+  saveTradingSigner: (secretKey: string, passphrase?: string) => Promise<{ success: boolean; error?: string }>;
+  unlockTradingSigner: (passphrase: string) => Promise<{ success: boolean; error?: string }>;
   clearTradingSigner: () => Promise<boolean>;
 
   // Mode Switch
   isLiveConfirmOpen: boolean;
   setIsLiveConfirmOpen: (open: boolean) => void;
+  riskChangedSinceLiveConfirm: boolean;
   requestModeChange: (targetMode: ExecutionMode) => Promise<void>;
   confirmLiveMode: () => Promise<boolean>;
 
@@ -156,9 +196,11 @@ export interface BotContextType {
 
   // Actions
   handleStartStop: () => Promise<void>;
+  handleKillSwitch: () => Promise<boolean>;
   handleControlAction: (action: string) => Promise<{ success: boolean; error?: string; data?: any }>;
   handleSaveConfig: (newConfig: any) => Promise<{ success: boolean; error?: string }>;
   handleSellPosition: (mint: string) => Promise<boolean>;
+  handleManualClearPosition: (mint: string) => Promise<boolean>;
   handleSellAll: () => Promise<boolean>;
   handleProbe: () => Promise<boolean>;
   handleResetAccount: () => Promise<boolean>;
@@ -186,11 +228,12 @@ function mapHashToTab(raw: string): SniperTabId | null {
 
 const DEFAULT_PORTFOLIO: PortfolioStats = {
   mode: 'paper',
-  sol_price_usd: 145,
+  sol_price_usd: null,
+  sol_price_available: false,
   cash: 50,
-  cash_sol: 0.3448,
+  cash_sol: 0,
   value: 50,
-  value_sol: 0.3448,
+  value_sol: 0,
   open_pnl: 0,
   open_pnl_sol: 0,
   day_pnl: 0,
@@ -202,6 +245,7 @@ const DEFAULT_PORTFOLIO: PortfolioStats = {
   win_rate_pct: 0,
   winrate: 'no closed trades',
   open_positions_count: 0,
+  pending_buys_count: 0,
   day: '',
 };
 
@@ -211,19 +255,21 @@ const DEFAULT_CLIENT_CONFIG = {
   trade_size_usd: 5.0,
   trade_size_sol: 0.035,
   max_open_positions: 2,
+  max_wallet_exposure_sol: 0.1,
   daily_loss_limit_usd: 10.0,
   daily_loss_limit_sol: 0.07,
   sizing_basis: 'sol',
   take_profit_pct: 35.0,
   trailing_stop_pct: 10.0,
-  stop_loss_pct: 25.0,
+  stop_loss_pct: 20.0,
   rug_exit_drop_pct: 75.0,
   max_hold_minutes: 60,
-  max_age_minutes: 1.5,
-  ultra_early_grace_sec: 5,
+  min_age_minutes: 30,
+  max_age_minutes: 720,
+  ultra_early_grace_sec: 0,
   scan_interval_sec: 1,
   monitor_interval_sec: 1.0,
-  min_liquidity_usd: 800.0,
+  min_liquidity_usd: 25000.0,
   min_buys_m5: 4,
   min_buy_sell_ratio_m5: 1.5,
   max_price_change_m5_pct: 150.0,
@@ -232,7 +278,7 @@ const DEFAULT_CLIENT_CONFIG = {
   use_rugcheck: true,
   strict_rugcheck: true,
   rugcheck_max_score: 30.0,
-  max_top10_holder_pct: 60.0,
+  max_top10_holder_pct: 35.0,
   rug_recheck_minutes: 15,
   use_gecko: true,
   use_jupiter_recent: true,
@@ -347,6 +393,7 @@ export const BotProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   );
   const portfolio: PortfolioStats = useMemo(() => ({ ...DEFAULT_PORTFOLIO, ...(status?.portfolio || {}) }), [status?.portfolio]);
   const srcStats = useMemo(() => status?.src_stats || {}, [status?.src_stats]);
+  const pendingBuys: PendingBuyRow[] = useMemo(() => status?.pending_buys || [], [status?.pending_buys]);
 
   const lifecycleState = botStatus.lifecycle_state || (botStatus.is_running ? 'RUNNING' : 'STOPPED');
   const isBotStopped = lifecycleState === 'STOPPED' || !botStatus.is_running;
@@ -354,10 +401,16 @@ export const BotProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   // ---------------- DATA FETCHERS ----------------
   const refreshTelemetry = useCallback(async (includeLogs = false) => {
     try {
-      const reqs: Promise<Response>[] = [fetch('/api/status'), fetch('/api/positions')];
-      if (includeLogs) reqs.push(fetch('/api/logs'));
+      const reqs: Promise<Response>[] = [apiFetch('/api/status'), apiFetch('/api/positions')];
+      if (includeLogs) reqs.push(apiFetch('/api/logs'));
       const [sRes, pRes, lRes] = await Promise.all(reqs);
-      if (sRes?.ok) setStatus(await sRes.json());
+      if (sRes?.ok) {
+        const sJson = await sRes.json();
+        setStatus(sJson);
+        if (sJson?.portfolio?.mode === 'paper' && typeof sJson?.portfolio?.cash === 'number') {
+          walletManager.syncPaperLedgerBalance(sJson.portfolio.cash, sJson.sol_price_usd ?? null);
+        }
+      }
       if (pRes?.ok) setPositions(await pRes.json());
       if (includeLogs && lRes?.ok) setLogs(await lRes.json());
     } catch {}
@@ -365,21 +418,21 @@ export const BotProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
   const refreshTrades = useCallback(async () => {
     try {
-      const res = await fetch('/api/trades');
+      const res = await apiFetch('/api/trades');
       if (res.ok) setTrades(await res.json());
     } catch {}
   }, []);
 
   const refreshWallets = useCallback(async () => {
     try {
-      const res = await fetch(`/api/wallets?mode=${config.EXECUTION_MODE || 'paper'}`);
+      const res = await apiFetch(`/api/wallets?mode=${config.EXECUTION_MODE || 'paper'}`);
       if (res.ok) setWallets(await res.json());
     } catch {}
   }, [config.EXECUTION_MODE]);
 
   const refreshSignerStatus = useCallback(async () => {
     try {
-      const res = await fetch('/api/trading-signer');
+      const res = await apiFetch('/api/trading-signer');
       if (res.ok) setSignerStatus(await res.json());
     } catch {}
   }, []);
@@ -455,7 +508,7 @@ export const BotProvider: React.FC<{ children: React.ReactNode }> = ({ children 
           if (!req?.id || !req?.base64Tx) return;
           say(`Phantom confirmation required: ${req.action} ${req.symbol}`, 'neutral', 10000);
           const signRes = await walletManager.signAndSendSolanaTransaction(req.base64Tx);
-          await fetch(`/api/live-tx/${encodeURIComponent(req.id)}/complete`, {
+          await apiFetch(`/api/live-tx/${encodeURIComponent(req.id)}/complete`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify(signRes),
@@ -547,19 +600,22 @@ export const BotProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     walletManager.disconnectWallet(id);
     setActiveWallet(walletManager.getActiveWallet());
     setWalletDiagnostics(walletManager.getWalletDiagnostics(config.DEFAULT_CHAIN || 'solana'));
-    fetch('/api/wallets/disconnect', {
+    apiFetch('/api/wallets/disconnect', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ chain: config.DEFAULT_CHAIN || 'solana' }),
     }).catch(() => {});
   };
 
-  const saveTradingSigner = async (secretKey: string): Promise<{ success: boolean; error?: string }> => {
+  const saveTradingSigner = async (
+    secretKey: string,
+    passphrase?: string
+  ): Promise<{ success: boolean; error?: string }> => {
     try {
-      const res = await fetch('/api/trading-signer', {
+      const res = await apiFetch('/api/trading-signer', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ secretKey }),
+        body: JSON.stringify({ secretKey, passphrase }),
       });
       const data = await res.json();
       if (!res.ok) return { success: false, error: data.error || 'Invalid private key' };
@@ -573,9 +629,28 @@ export const BotProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     }
   };
 
+  const unlockTradingSigner = async (passphrase: string): Promise<{ success: boolean; error?: string }> => {
+    try {
+      const res = await apiFetch('/api/trading-signer/unlock', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ passphrase }),
+      });
+      const data = await res.json();
+      if (!res.ok) return { success: false, error: data.error || 'Unlock failed' };
+      await refreshSignerStatus();
+      await refreshWallets();
+      await refreshTelemetry();
+      say('Encrypted live trading signer unlocked.', 'success');
+      return { success: true };
+    } catch (err: any) {
+      return { success: false, error: err.message };
+    }
+  };
+
   const clearTradingSigner = async (): Promise<boolean> => {
     try {
-      const res = await fetch('/api/trading-signer', { method: 'DELETE' });
+      const res = await apiFetch('/api/trading-signer', { method: 'DELETE' });
       if (res.ok) {
         await refreshSignerStatus();
         await refreshWallets();
@@ -589,10 +664,21 @@ export const BotProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
   // ---------------- MODE SWITCH & ACTIONS ----------------
   const [isLiveConfirmOpen, setIsLiveConfirmOpen] = useState(false);
+  const [confirmedLiveRisk, setConfirmedLiveRisk] = useState<{ sl: number; tp: number } | null>(null);
+
+  const riskChangedSinceLiveConfirm = useMemo(() => {
+    if (config.EXECUTION_MODE !== 'live') return false;
+    const baseline = confirmedLiveRisk || status?.last_confirmed_live_risk || null;
+    if (!baseline) return false;
+    return (
+      Number(config.stop_loss_pct) !== Number(baseline.sl) ||
+      Number(config.take_profit_pct) !== Number(baseline.tp)
+    );
+  }, [config.EXECUTION_MODE, config.stop_loss_pct, config.take_profit_pct, confirmedLiveRisk, status?.last_confirmed_live_risk]);
 
   const handleSaveConfig = async (newConfig: any): Promise<{ success: boolean; error?: string }> => {
     try {
-      const res = await fetch('/api/settings', {
+      const res = await apiFetch('/api/settings', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(newConfig),
@@ -628,12 +714,13 @@ export const BotProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     await handleControlAction('stop_bot');
     const res = await handleSaveConfig({ ...config, EXECUTION_MODE: 'live' });
     if (res.success) {
+      setConfirmedLiveRisk({ sl: Number(config.stop_loss_pct), tp: Number(config.take_profit_pct) });
       walletManager.setMode('live');
       setIsLiveConfirmOpen(false);
       await refreshTelemetry();
       await refreshWallets();
       await refreshTrades();
-      say('Switched to LIVE mode. Verify Phantom wallet and signer keypair before pressing Start bot.', 'error', 6000);
+      say('Switched to LIVE mode. Verify server signer and risk limits before pressing Start bot.', 'error', 6000);
       return true;
     }
     say(res.error || 'Could not enable Live mode.', 'error', 6000);
@@ -650,7 +737,7 @@ export const BotProvider: React.FC<{ children: React.ReactNode }> = ({ children 
           setWalletDiagnostics(walletManager.getWalletDiagnostics(config.DEFAULT_CHAIN || 'solana'));
         }
       }
-      const res = await fetch('/api/control', {
+      const res = await apiFetch('/api/control', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ action }),
@@ -671,6 +758,11 @@ export const BotProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
   const handleStartStop = async () => {
     if (isBotStopped) {
+      if (config.EXECUTION_MODE === 'live' && riskChangedSinceLiveConfirm) {
+        setIsLiveConfirmOpen(true);
+        say('Stop-loss or take-profit changed since last Live confirm — please re-confirm.', 'error', 6000);
+        return;
+      }
       const res = await handleControlAction('start_bot');
       if (res.success) say('Bot started.', 'success');
     } else {
@@ -679,9 +771,31 @@ export const BotProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     }
   };
 
+  const handleKillSwitch = async (): Promise<boolean> => {
+    try {
+      const res = await apiFetch('/api/kill', { method: 'POST' });
+      const data = await res.json();
+      await refreshTelemetry(true);
+      await refreshTrades();
+      if (res.ok) {
+        say(
+          `Kill switch executed: bot stopped, closed ${data.closed_positions ?? 0} position(s).`,
+          'error',
+          7000
+        );
+        return true;
+      }
+      say(data.error || 'Kill switch failed.', 'error');
+      return false;
+    } catch (err: any) {
+      say(err.message || 'Kill switch error', 'error');
+      return false;
+    }
+  };
+
   const handleSellPosition = async (mint: string): Promise<boolean> => {
     try {
-      const res = await fetch(`/api/positions/${encodeURIComponent(mint)}/sell`, { method: 'POST' });
+      const res = await apiFetch(`/api/positions/${encodeURIComponent(mint)}/sell`, { method: 'POST' });
       const data = await res.json();
       if (!res.ok) {
         say(data.error || 'Sell failed.', 'error', 5000);
@@ -697,9 +811,27 @@ export const BotProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     }
   };
 
+  const handleManualClearPosition = async (mint: string): Promise<boolean> => {
+    try {
+      const res = await apiFetch(`/api/positions/${encodeURIComponent(mint)}/manual-clear`, { method: 'POST' });
+      const data = await res.json();
+      if (!res.ok) {
+        say(data.error || 'Manual clear failed.', 'error', 5000);
+        return false;
+      }
+      say(data.message || 'Position manually cleared (marked estimated).', 'neutral', 5000);
+      await refreshTelemetry(true);
+      await refreshTrades();
+      return true;
+    } catch (err: any) {
+      say(err.message || 'Manual clear failed.', 'error');
+      return false;
+    }
+  };
+
   const handleSellAll = async (): Promise<boolean> => {
     try {
-      const res = await fetch('/api/positions/sell-all', { method: 'POST' });
+      const res = await apiFetch('/api/positions/sell-all', { method: 'POST' });
       const data = await res.json();
       if (!res.ok) {
         say(data.error || 'Sell all failed.', 'error');
@@ -737,7 +869,7 @@ export const BotProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
   const handleClearLogs = async () => {
     try {
-      await fetch('/api/logs/clear', { method: 'POST' });
+      await apiFetch('/api/logs/clear', { method: 'POST' });
       setLogs([]);
       say('Scan log cleared.', 'neutral');
     } catch {}
@@ -757,6 +889,7 @@ export const BotProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         lifecycleState,
         executionProgress,
         positions,
+        pendingBuys,
         trades,
         logs,
         wallets,
@@ -774,17 +907,21 @@ export const BotProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         refreshWalletBalance,
         refreshSignerStatus,
         saveTradingSigner,
+        unlockTradingSigner,
         clearTradingSigner,
         isLiveConfirmOpen,
         setIsLiveConfirmOpen,
+        riskChangedSinceLiveConfirm,
         requestModeChange,
         confirmLiveMode,
         theme,
         toggleTheme,
         handleStartStop,
+        handleKillSwitch,
         handleControlAction,
         handleSaveConfig,
         handleSellPosition,
+        handleManualClearPosition,
         handleSellAll,
         handleProbe,
         handleResetAccount,

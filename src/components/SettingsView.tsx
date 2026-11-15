@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from 'react';
-import { CheckCircle2, AlertTriangle, RotateCcw, Save, X, ArrowLeftRight } from 'lucide-react';
+import { CheckCircle2, AlertTriangle, RotateCcw, Save, X, ArrowLeftRight, Info } from 'lucide-react';
 import { useBot } from '../context/BotContext';
 
 interface SettingField {
@@ -14,14 +14,15 @@ const SETTING_FIELDS: SettingField[] = [
   { key: 'start_balance', solKey: 'start_balance_sol', usdKey: 'start_balance_usd', label: 'Start balance $ (used on reset)', kind: 'dual_sol_usd' },
   { key: 'trade_size', solKey: 'trade_size_sol', usdKey: 'trade_size_usd', label: 'Trade size $', kind: 'dual_sol_usd' },
   { key: 'max_open_positions', label: 'Max open positions', kind: 'int' },
+  { key: 'max_wallet_exposure_sol', label: 'Max Live wallet exposure (SOL)', kind: 'float' },
   { key: 'daily_loss_limit', solKey: 'daily_loss_limit_sol', usdKey: 'daily_loss_limit_usd', label: 'Daily loss limit $', kind: 'dual_sol_usd' },
-  { key: 'take_profit_pct', label: 'Take profit % (0 = off)', kind: 'float' },
+  { key: 'take_profit_pct', label: 'Take profit % (>= 1.5x stop loss)', kind: 'float' },
   { key: 'trailing_stop_pct', label: 'Trailing stop % from peak (0 = off)', kind: 'float' },
-  { key: 'stop_loss_pct', label: 'Stop loss % below entry (0 = off)', kind: 'float' },
+  { key: 'stop_loss_pct', label: 'Stop loss % below entry (max 20%)', kind: 'float' },
   { key: 'rug_exit_drop_pct', label: 'Rugpull auto-clear drop % (0 = off)', kind: 'float' },
   { key: 'max_hold_minutes', label: 'Max hold (minutes)', kind: 'int' },
+  { key: 'min_age_minutes', label: 'Sniper window: min coin age (minutes)', kind: 'float' },
   { key: 'max_age_minutes', label: 'Sniper window: max coin age (minutes)', kind: 'float' },
-  { key: 'ultra_early_grace_sec', label: 'Ultra-early grace (sec)', kind: 'int' },
   { key: 'scan_interval_sec', label: 'Scan for new coins every (sec)', kind: 'int' },
   { key: 'monitor_interval_sec', label: 'Price check every (sec)', kind: 'float' },
   { key: 'min_liquidity_usd', label: 'Min liquidity $', kind: 'float' },
@@ -30,11 +31,10 @@ const SETTING_FIELDS: SettingField[] = [
   { key: 'max_price_change_m5_pct', label: 'Skip if pumped +X% in 5 min', kind: 'float' },
   { key: 'min_volume_m5_usd', label: 'Min 5-min volume $ (0 = off)', kind: 'float' },
   { key: 'min_holders', label: 'Min holders (0 = off)', kind: 'int' },
-  { key: 'min_buys_m5', label: 'Min buys in last 1h (0 = off)', kind: 'int' },
-  { key: 'use_rugcheck', label: 'Hard RugCheck (score + risks)', kind: 'bool' },
+  { key: 'use_rugcheck', label: 'Hard RugCheck (fail-closed)', kind: 'bool' },
   { key: 'strict_rugcheck', label: 'Strict: reject ANY danger risk', kind: 'bool' },
   { key: 'rugcheck_max_score', label: 'Max RugCheck risk score (0-100)', kind: 'float' },
-  { key: 'max_top10_holder_pct', label: 'Max top-10 holders %', kind: 'float' },
+  { key: 'max_top10_holder_pct', label: 'Max top-10 non-pool holders %', kind: 'float' },
   { key: 'rug_recheck_minutes', label: 'Recheck rug score every (min)', kind: 'int' },
   { key: 'use_gecko', label: 'Source: GeckoTerminal new pools (all DEXes)', kind: 'bool' },
   { key: 'use_jupiter_recent', label: 'Source: Jupiter recent tokens', kind: 'bool' },
@@ -53,15 +53,16 @@ const LIMITS: Record<string, [number, number]> = {
   trade_size_usd: [0.01, 1e6],
   trade_size_sol: [0.0001, 1e5],
   max_open_positions: [1, 50],
+  max_wallet_exposure_sol: [0.001, 100],
   daily_loss_limit_usd: [0, 1e7],
   daily_loss_limit_sol: [0, 1e6],
   take_profit_pct: [0, 1e5],
   trailing_stop_pct: [0, 1000],
-  stop_loss_pct: [0, 99.9],
+  stop_loss_pct: [0, 20],
   rug_exit_drop_pct: [0, 99.9],
   max_hold_minutes: [1, 1e5],
-  max_age_minutes: [0.05, 60],
-  ultra_early_grace_sec: [0, 300],
+  min_age_minutes: [1, 1440],
+  max_age_minutes: [1, 10080],
   scan_interval_sec: [1, 3600],
   monitor_interval_sec: [0.2, 60],
   min_liquidity_usd: [0, 1e9],
@@ -91,7 +92,8 @@ function fmtSolInput(n: number): string {
 export const SettingsView: React.FC = () => {
   const { config, portfolio, status, isBotStopped, handleSaveConfig, handleResetAccount, say } = useBot();
 
-  const solPriceUsd = Number(status?.sol_price_usd || portfolio?.sol_price_usd || 145);
+  const rawSolPx = Number(status?.sol_price_usd || portfolio?.sol_price_usd || 0);
+  const solPriceUsd = rawSolPx > 0 ? rawSolPx : 0;
 
   const [values, setValues] = useState<Record<string, any>>({});
   const [errors, setErrors] = useState<string[]>([]);
@@ -110,13 +112,13 @@ export const SettingsView: React.FC = () => {
         next[f.solKey] =
           solVal !== undefined && solVal !== null
             ? String(solVal)
-            : usdVal !== undefined && usdVal !== null
+            : usdVal !== undefined && usdVal !== null && solPriceUsd > 0
             ? fmtSolInput(Number(usdVal) / solPriceUsd)
             : '';
         next[f.usdKey] =
           usdVal !== undefined && usdVal !== null
             ? String(usdVal)
-            : solVal !== undefined && solVal !== null
+            : solVal !== undefined && solVal !== null && solPriceUsd > 0
             ? fmtUsdInput(Number(solVal) * solPriceUsd)
             : '';
       } else {
@@ -127,13 +129,15 @@ export const SettingsView: React.FC = () => {
     next.sizing_basis = config.sizing_basis === 'usd' ? 'usd' : 'sol';
     next.jupiter_api_key = config.jupiter_api_key || '';
     const maxUsd = Number(config.MAX_POSITION_SIZE_USD ?? 100);
-    const maxSol = Number(config.MAX_POSITION_SIZE_SOL ?? Number((maxUsd / solPriceUsd).toFixed(4)));
+    const maxSol = Number(
+      config.MAX_POSITION_SIZE_SOL ?? (solPriceUsd > 0 ? Number((maxUsd / solPriceUsd).toFixed(4)) : 0.7)
+    );
     next.MAX_POSITION_SIZE_USD = String(maxUsd);
     next.MAX_POSITION_SIZE_SOL = String(maxSol);
     next.MIN_GAS_RESERVE_SOL = String(config.MIN_GAS_RESERVE_SOL ?? 0.01);
     next.PRIORITY_FEE_LEVEL = config.PRIORITY_FEE_LEVEL || 'standard';
     setValues(next);
-  }, [configSnapshot]);
+  }, [configSnapshot, solPriceUsd]);
 
   const handleFieldChange = (key: string, val: any) => {
     setValues((prev) => ({ ...prev, [key]: val }));
@@ -171,6 +175,7 @@ export const SettingsView: React.FC = () => {
     const errs: string[] = [];
     const payload: Record<string, any> = {
       sizing_basis: values.sizing_basis === 'usd' ? 'usd' : 'sol',
+      ultra_early_grace_sec: 0,
     };
 
     for (const f of SETTING_FIELDS) {
@@ -212,6 +217,27 @@ export const SettingsView: React.FC = () => {
       payload[f.key] = converted;
     }
 
+    if (
+      payload.stop_loss_pct !== undefined &&
+      payload.take_profit_pct !== undefined &&
+      payload.stop_loss_pct > 0 &&
+      payload.take_profit_pct < payload.stop_loss_pct * 1.5
+    ) {
+      errs.push(
+        `Take profit (${payload.take_profit_pct}%) must be at least 1.5x stop loss (${payload.stop_loss_pct}% -> min ${(payload.stop_loss_pct * 1.5).toFixed(1)}%).`
+      );
+    }
+
+    if (
+      payload.min_age_minutes !== undefined &&
+      payload.max_age_minutes !== undefined &&
+      payload.min_age_minutes > payload.max_age_minutes
+    ) {
+      errs.push(
+        `Min coin age (${payload.min_age_minutes}m) cannot exceed max coin age (${payload.max_age_minutes}m).`
+      );
+    }
+
     const maxPosUsd = Number(values.MAX_POSITION_SIZE_USD);
     if (!isNaN(maxPosUsd) && maxPosUsd > 0) payload.MAX_POSITION_SIZE_USD = maxPosUsd;
     const maxPosSol = Number(values.MAX_POSITION_SIZE_SOL);
@@ -233,8 +259,8 @@ export const SettingsView: React.FC = () => {
     try {
       const res = await handleSaveConfig(payload);
       if (res.success) {
-        setSavedBanner('Settings applied and saved (SOL & $ synced).');
-        say('Settings applied and saved.', 'success');
+        setSavedBanner('Settings saved and logged (applies to new positions only).');
+        say('Settings applied and saved (new positions only).', 'success');
       } else if (res.error) {
         setErrors(res.error.split('\n'));
       }
@@ -333,7 +359,7 @@ export const SettingsView: React.FC = () => {
   };
 
   const gasReserveNum = Number(values.MIN_GAS_RESERVE_SOL || 0);
-  const gasReserveUsd = !isNaN(gasReserveNum) ? gasReserveNum * solPriceUsd : 0;
+  const gasReserveUsd = !isNaN(gasReserveNum) && solPriceUsd > 0 ? gasReserveNum * solPriceUsd : 0;
 
   return (
     <form
@@ -363,11 +389,19 @@ export const SettingsView: React.FC = () => {
         </div>
       )}
 
+      {/* Open Positions Immutability Notice */}
+      <div className="px-3.5 py-2 rounded-lg border border-[var(--teal)]/30 bg-[var(--teal)]/8 text-xs text-[var(--text)] flex items-center gap-2">
+        <Info size={14} className="text-[var(--teal)] shrink-0" />
+        <span>
+          <strong>Settings apply to new positions only.</strong> Open positions retain their entry take-profit, stop-loss, trailing stop, rug-drop, and max-hold thresholds. Every setting change is logged.
+        </span>
+      </div>
+
       {/* Inline Reset Confirmation */}
       {confirmReset && (
         <div className="p-3 rounded-lg border border-[var(--red)]/50 bg-[var(--red)]/10 flex flex-wrap items-center justify-between gap-3 text-xs">
           <span className="font-medium text-[var(--text)]">
-            Reset paper account: this deletes all open paper positions and trade history. Continue?
+            Reset paper account: clears open paper/testnet positions (Live trades &amp; Live ledger preserved). Continue?
           </span>
           <div className="flex items-center gap-2">
             <button
@@ -394,7 +428,15 @@ export const SettingsView: React.FC = () => {
         <div className="flex items-center gap-2 text-[var(--muted)]">
           <ArrowLeftRight size={13} className="text-[var(--teal)]" />
           <span>
-            Live reference: <strong className="font-mono text-[var(--text)]">1 SOL = ${solPriceUsd.toFixed(2)}</strong> — edit either SOL or $ and both stay synced.
+            {solPriceUsd > 0 ? (
+              <>
+                Live reference: <strong className="font-mono text-[var(--text)]">1 SOL = ${solPriceUsd.toFixed(2)}</strong> — edit either SOL or $ and both stay synced.
+              </>
+            ) : (
+              <span className="text-[var(--orange)] font-medium">
+                SOL price unavailable — enter exact SOL amounts directly (USD conversion paused).
+              </span>
+            )}
           </span>
         </div>
         <div className="flex items-center gap-1.5 font-mono text-[11px]">

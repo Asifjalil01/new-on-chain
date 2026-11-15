@@ -23,9 +23,11 @@ export const WalletsView: React.FC = () => {
     activeWallet,
     walletDiagnostics,
     signerStatus,
+    status,
     setIsWalletModalOpen,
     refreshWalletBalance,
     saveTradingSigner,
+    unlockTradingSigner,
     clearTradingSigner,
     config,
   } = useBot();
@@ -35,6 +37,8 @@ export const WalletsView: React.FC = () => {
   const [isRefreshing, setIsRefreshing] = useState(false);
 
   const [signerKeyInput, setSignerKeyInput] = useState('');
+  const [signerPassphrase, setSignerPassphrase] = useState('');
+  const [unlockPassphrase, setUnlockPassphrase] = useState('');
   const [signerBusy, setSignerBusy] = useState(false);
   const [signerMessage, setSignerMessage] = useState<{ type: 'ok' | 'err'; text: string } | null>(null);
 
@@ -69,12 +73,40 @@ export const WalletsView: React.FC = () => {
     setSignerBusy(true);
     setSignerMessage(null);
     try {
-      const res = await saveTradingSigner(signerKeyInput.trim());
+      const res = await saveTradingSigner(
+        signerKeyInput.trim(),
+        signerPassphrase.trim() || undefined
+      );
       if (res.success) {
+        const encrypted = signerPassphrase.trim().length > 0;
         setSignerKeyInput('');
-        setSignerMessage({ type: 'ok', text: 'Autonomous Solana trading signer configured in server memory.' });
+        setSignerPassphrase('');
+        setSignerMessage({
+          type: 'ok',
+          text: encrypted
+            ? 'Server trading signer configured in memory and encrypted on disk (.sniper_signer.key).'
+            : 'Server trading signer configured in process memory only (not written to disk).',
+        });
       } else {
         setSignerMessage({ type: 'err', text: res.error || 'Failed to parse private key.' });
+      }
+    } finally {
+      setSignerBusy(false);
+    }
+  };
+
+  const handleUnlockSigner = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!unlockPassphrase.trim()) return;
+    setSignerBusy(true);
+    setSignerMessage(null);
+    try {
+      const res = await unlockTradingSigner(unlockPassphrase.trim());
+      if (res.success) {
+        setUnlockPassphrase('');
+        setSignerMessage({ type: 'ok', text: 'Encrypted server signer unlocked into memory.' });
+      } else {
+        setSignerMessage({ type: 'err', text: res.error || 'Failed to unlock signer.' });
       }
     } finally {
       setSignerBusy(false);
@@ -87,7 +119,7 @@ export const WalletsView: React.FC = () => {
     try {
       const ok = await clearTradingSigner();
       if (ok) {
-        setSignerMessage({ type: 'ok', text: 'Autonomous trading signer removed from server memory.' });
+        setSignerMessage({ type: 'ok', text: 'Server trading signer removed from memory and disk.' });
       }
     } finally {
       setSignerBusy(false);
@@ -96,28 +128,28 @@ export const WalletsView: React.FC = () => {
 
   const signerConnected = Boolean(signerStatus?.configured && signerStatus?.address);
   const browserConnected = activeWallet.connected && Boolean(activeWallet.address) && activeWallet.id !== 'paper';
-  const hasLiveConnected = isLive && (browserConnected || signerConnected);
-  const effectiveAddress = browserConnected ? activeWallet.address : signerConnected ? signerStatus!.address : activeWallet.address;
-  const effectiveName = browserConnected
+  const hasLiveConnected = isLive && signerConnected;
+  const effectiveAddress = signerConnected ? signerStatus!.address : browserConnected ? activeWallet.address : activeWallet.address;
+  const effectiveName = signerConnected
+    ? 'Solana Server Trading Signer'
+    : browserConnected
     ? activeWallet.name
-    : signerConnected
-    ? 'Solana Trading Keypair (Desktop)'
     : activeWallet.name;
-  const effectiveBalanceSol = browserConnected
-    ? activeWallet.nativeBalance
-    : signerConnected && typeof signerStatus?.balanceSol === 'number'
+  const effectiveBalanceSol = signerConnected && typeof signerStatus?.balanceSol === 'number'
     ? signerStatus.balanceSol
+    : browserConnected
+    ? activeWallet.nativeBalance
     : activeWallet.nativeBalance;
-  const effectiveBalanceUsd = browserConnected
-    ? activeWallet.balanceUsd
-    : signerConnected && typeof signerStatus?.balanceUsd === 'number'
+  const effectiveBalanceUsd = signerConnected && typeof signerStatus?.balanceUsd === 'number'
     ? signerStatus.balanceUsd
+    : browserConnected
+    ? activeWallet.balanceUsd
     : activeWallet.balanceUsd;
   const effectiveReady =
-    walletDiagnostics?.liveTradingReadiness === 'READY' ||
-    (signerConnected && (signerStatus?.balanceSol ?? 0) >= Number(config.MIN_GAS_RESERVE_SOL || 0.01));
+    signerConnected && (signerStatus?.balanceSol ?? 0) >= Number(config.MIN_GAS_RESERVE_SOL || 0.01);
+  const solPx = Number(status?.sol_price_usd || 0);
   const startBal = Number(config.start_balance_usd ?? 50);
-  const startBalSol = Number(config.start_balance_sol ?? Number((startBal / 145).toFixed(4)));
+  const startBalSol = Number(config.start_balance_sol ?? (solPx > 0 ? Number((startBal / solPx).toFixed(4)) : 0));
 
   return (
     <div className="flex-1 flex flex-col min-h-0 min-w-0 overflow-y-auto bg-[var(--bg)] p-4 space-y-4">
@@ -137,23 +169,23 @@ export const WalletsView: React.FC = () => {
           <span aria-hidden="true">·</span>
           <span className="text-[var(--text)]">
             {isLive
-              ? 'Real on-chain Solana mainnet wallet execution. Paper vault isolated.'
+              ? 'Real on-chain Solana mainnet execution. Server-side trading signer required for automated SL/rug exits.'
               : isTestnet
               ? 'Testnet / devnet RPC context.'
-              : `Paper trading simulation active (${startBalSol.toFixed(4)} SOL / $${startBal.toFixed(2)} starting balance). Connect Phantom or set a Desktop Signer anytime for Live trading.`}
+              : `Paper trading simulation active (${startBalSol > 0 ? `${startBalSol.toFixed(4)} SOL / ` : ''}$${startBal.toFixed(2)} starting balance). Popup-only wallets are restricted to Paper mode.`}
           </span>
         </div>
       </div>
 
-      {/* Live Mode Warning if no real wallet or signer connected */}
+      {/* Live Mode Warning if no server signer connected */}
       {isLive && !hasLiveConnected && (
         <div className="bg-[var(--red)]/10 border border-[var(--red)] rounded-lg p-4 flex flex-col md:flex-row items-start md:items-center justify-between gap-3 text-xs">
           <div className="flex items-start gap-3">
             <AlertTriangle size={20} className="text-[var(--red)] shrink-0 mt-0.5" />
             <div>
-              <p className="font-bold text-[var(--red)] text-sm">Real Solana wallet required for Live mode</p>
+              <p className="font-bold text-[var(--red)] text-sm">Server-side trading signer required for Live Start</p>
               <p className="text-[var(--text)] mt-1">
-                Import your Phantom private key in the Desktop Live Signer section below (or connect a Phantom browser wallet) before starting Live mode.
+                Browser popup mode (Phantom prompts) cannot execute unattended stop-loss or rugpull exits and is restricted to Paper mode. Set or unlock your dedicated server-side keypair below before starting Live mode.
               </p>
             </div>
           </div>
@@ -163,7 +195,7 @@ export const WalletsView: React.FC = () => {
             className="px-4 py-2 rounded-lg bg-[var(--red)] text-white font-semibold hover:brightness-110 flex items-center gap-2 cursor-pointer shrink-0 whitespace-nowrap"
           >
             <Wallet size={14} />
-            <span>Connect wallet / keypair</span>
+            <span>Configure signer</span>
           </button>
         </div>
       )}
@@ -197,11 +229,11 @@ export const WalletsView: React.FC = () => {
             <div className="mt-1">
               <div className="text-sm font-bold text-[var(--text)]">{effectiveName}</div>
               <div className="text-[11px] text-[var(--teal)] mt-0.5">
-                {signerConnected && !browserConnected ? 'Solana Mainnet-Beta' : activeWallet.network}
+                {signerConnected ? 'Solana Mainnet-Beta' : activeWallet.network}
               </div>
             </div>
             <div className="mt-2 pt-2 border-t border-[var(--border)] text-[10px] text-[var(--muted)] font-mono truncate">
-              RPC: {walletDiagnostics?.rpcEndpoint || 'https://api.mainnet-beta.solana.com'}
+              RPC: {walletDiagnostics?.rpcEndpoint || 'Configured SOLANA_RPC_URL'}
             </div>
           </div>
 
@@ -226,7 +258,7 @@ export const WalletsView: React.FC = () => {
                 <span className="text-xs font-semibold text-[var(--dim)]">Not connected</span>
               )}
               <div className="text-[11px] text-[var(--muted)] mt-0.5">
-                {browserConnected || signerConnected ? 'Connected' : 'Disconnected'}
+                {signerConnected ? 'Server signer active' : browserConnected ? 'Browser popup (Paper only)' : 'Disconnected'}
               </div>
             </div>
             <div className="mt-2 pt-2 border-t border-[var(--border)] text-[11px] text-[var(--muted)] flex items-center justify-between font-mono">
@@ -241,7 +273,7 @@ export const WalletsView: React.FC = () => {
             <div className="text-[11px] text-[var(--dim)] font-medium">On-chain balance</div>
             <div className="mt-1 font-mono tabular-nums">
               <div className="text-base font-bold text-[var(--text)]">
-                {effectiveBalanceSol.toFixed(5)} {browserConnected ? activeWallet.nativeSymbol : 'SOL'}
+                {effectiveBalanceSol.toFixed(5)} {signerConnected ? 'SOL' : browserConnected ? activeWallet.nativeSymbol : 'SOL'}
               </div>
               <div className="text-[11px] text-[var(--green)] font-semibold mt-0.5">
                 {formatUsd(effectiveBalanceUsd)} USD
@@ -249,7 +281,7 @@ export const WalletsView: React.FC = () => {
             </div>
             <div className="mt-2 pt-2 border-t border-[var(--border)] text-[11px] text-[var(--dim)] flex items-center justify-between font-mono tabular-nums">
               <span>Gas reserve</span>
-              <span>{config.MIN_GAS_RESERVE_SOL || activeWallet.gasReserved} {browserConnected ? activeWallet.nativeSymbol : 'SOL'}</span>
+              <span>{config.MIN_GAS_RESERVE_SOL || activeWallet.gasReserved} SOL</span>
             </div>
           </div>
 
@@ -263,19 +295,19 @@ export const WalletsView: React.FC = () => {
                   <XCircle size={15} className="text-[var(--red)] shrink-0" />
                 )}
                 <span className={`text-xs font-bold ${effectiveReady ? 'text-[var(--green)]' : 'text-[var(--red)]'}`}>
-                  {effectiveReady ? 'READY' : walletDiagnostics?.liveTradingReadiness || 'NOT READY'}
+                  {effectiveReady ? 'READY' : 'SIGNER REQUIRED'}
                 </span>
               </div>
               <div className="text-[11px] text-[var(--muted)] mt-1 line-clamp-2">
                 {signerConnected
-                  ? 'Desktop/local keypair configured. Ready for autonomous live execution.'
-                  : walletDiagnostics?.readinessReason || 'Checking prerequisites...'}
+                  ? 'Server keypair configured. Ready for unattended stop-loss and rug exits.'
+                  : 'Paper only: browser popup wallets cannot execute automated stop-loss or rug exits.'}
               </div>
             </div>
             <div className="mt-2 pt-2 border-t border-[var(--border)] text-[11px] text-[var(--dim)] flex items-center justify-between font-mono">
               <span>Signing</span>
               <span className="font-semibold text-[var(--teal)]">
-                {signerConnected ? 'Local keypair' : activeWallet.signingAvailable ? 'Browser prompt' : 'Read-only'}
+                {signerConnected ? 'Server keypair' : signerStatus?.locked ? 'Locked (encrypted)' : activeWallet.signingAvailable ? 'Popup (Paper only)' : 'Read-only'}
               </span>
             </div>
           </div>
@@ -296,7 +328,7 @@ export const WalletsView: React.FC = () => {
             <div className="flex items-center gap-2 flex-wrap">
               <span className="font-bold text-[var(--text)] text-sm">{effectiveName}</span>
               <span className="text-[11px] text-[var(--dim)] font-mono">
-                {isLive ? '· Live wallet' : `· ${signerConnected && !browserConnected ? 'keypair' : activeWallet.type}`}
+                {isLive ? '· Live wallet' : `· ${signerConnected ? 'keypair' : activeWallet.type}`}
               </span>
             </div>
             <div className="text-xs text-[var(--muted)] flex items-center gap-2 mt-0.5 font-mono flex-wrap tabular-nums">
@@ -309,7 +341,7 @@ export const WalletsView: React.FC = () => {
               </span>
               <span aria-hidden="true">·</span>
               <span className={`font-bold ${isLive ? 'text-[var(--red)]' : 'text-[var(--teal)]'}`}>
-                {effectiveBalanceSol.toFixed(5)} {browserConnected ? activeWallet.nativeSymbol : 'SOL'} ({formatUsd(effectiveBalanceUsd)})
+                {effectiveBalanceSol.toFixed(5)} SOL ({formatUsd(effectiveBalanceUsd)})
               </span>
             </div>
           </div>
@@ -325,22 +357,24 @@ export const WalletsView: React.FC = () => {
         </button>
       </div>
 
-      {/* Autonomous Live Signer Keypair (required for unattended live sniper buys/sells) */}
+      {/* Server-Side Live Signer Keypair (required for Live mode exits) */}
       <div className="bg-[var(--card)] border border-[var(--border)] rounded-lg p-4 space-y-3 text-xs">
         <div className="flex flex-wrap items-center justify-between gap-2 border-b border-[var(--border)] pb-2">
           <div className="flex items-center gap-2 font-semibold text-[var(--text)]">
             <KeyRound size={15} className="text-[var(--teal)]" />
-            <span>Autonomous Live Swap Signer (Optional — Unattended Mode)</span>
+            <span>Server-Side Live Swap Signer (Required for Live Mode Exits)</span>
           </div>
-          <span className={`font-mono font-semibold ${signerStatus?.configured ? 'text-[var(--green)]' : 'text-[var(--muted)]'}`}>
+          <span className={`font-mono font-semibold ${signerStatus?.configured ? 'text-[var(--green)]' : signerStatus?.locked ? 'text-[var(--orange)]' : 'text-[var(--red)]'}`}>
             {signerStatus?.configured
               ? `Configured (${signerStatus.address?.slice(0, 6)}...${signerStatus.address?.slice(-4)})`
-              : 'Optional (Phantom browser popup active)'}
+              : signerStatus?.locked
+              ? 'Encrypted key on disk — locked'
+              : 'Not configured (Paper only)'}
           </span>
         </div>
 
         <p className="text-[var(--muted)] leading-relaxed">
-          By default, Live mode works directly with your connected <strong>Phantom / Solflare</strong> browser extension and prompts you to approve each swap in Phantom. Only paste a dedicated trading keypair below (or set <code className="text-[var(--text)]">SOLANA_PRIVATE_KEY</code>) if you want unattended auto-signing without Phantom popups.
+          Live mode blocks Start unless a server-side keypair is configured (or set via <code className="text-[var(--text)]">SOLANA_PRIVATE_KEY</code>), because stop-loss and rug exits cannot wait for 65s Phantom browser popups. Optionally provide a passphrase to store the key encrypted with AES-256-GCM; leave the passphrase blank to keep it strictly in process memory.
         </p>
 
         {signerMessage && (
@@ -355,13 +389,40 @@ export const WalletsView: React.FC = () => {
           </div>
         )}
 
+        {signerStatus?.locked && (
+          <form onSubmit={handleUnlockSigner} className="flex flex-wrap items-center gap-2 p-2.5 rounded-lg bg-[var(--orange)]/10 border border-[var(--orange)]/40">
+            <Lock size={14} className="text-[var(--orange)] shrink-0" />
+            <input
+              type="password"
+              value={unlockPassphrase}
+              onChange={(e) => setUnlockPassphrase(e.target.value)}
+              placeholder="Enter passphrase to unlock encrypted signer (.sniper_signer.key)..."
+              className="flex-1 min-w-[240px] bg-[var(--panel)] border border-[var(--border-bright)] rounded-lg px-3 py-1.5 text-xs font-mono text-[var(--text)] focus:outline-none focus:border-[var(--orange)]"
+            />
+            <button
+              type="submit"
+              disabled={signerBusy || !unlockPassphrase.trim()}
+              className="px-3.5 py-1.5 rounded-lg bg-[var(--orange)] text-white font-semibold cursor-pointer hover:brightness-110 disabled:opacity-50 whitespace-nowrap"
+            >
+              {signerBusy ? 'Unlocking...' : 'Unlock signer'}
+            </button>
+          </form>
+        )}
+
         <form onSubmit={handleSaveSigner} className="flex flex-wrap items-center gap-2">
           <input
             type="password"
             value={signerKeyInput}
             onChange={(e) => setSignerKeyInput(e.target.value)}
             placeholder="Paste dedicated Solana trading Base58 private key or [byte array]..."
-            className="flex-1 min-w-[260px] bg-[var(--panel)] border border-[var(--border-bright)] rounded-lg px-3 py-2 text-xs font-mono text-[var(--text)] focus:outline-none focus:border-[var(--teal)]"
+            className="flex-1 min-w-[240px] bg-[var(--panel)] border border-[var(--border-bright)] rounded-lg px-3 py-2 text-xs font-mono text-[var(--text)] focus:outline-none focus:border-[var(--teal)]"
+          />
+          <input
+            type="password"
+            value={signerPassphrase}
+            onChange={(e) => setSignerPassphrase(e.target.value)}
+            placeholder="Optional passphrase (AES-256-GCM on disk)"
+            className="w-64 bg-[var(--panel)] border border-[var(--border-bright)] rounded-lg px-3 py-2 text-xs font-mono text-[var(--text)] focus:outline-none focus:border-[var(--teal)]"
           />
           <button
             type="submit"
@@ -370,7 +431,7 @@ export const WalletsView: React.FC = () => {
           >
             {signerBusy ? 'Saving...' : 'Set live signer'}
           </button>
-          {signerStatus?.configured && (
+          {(signerStatus?.configured || signerStatus?.encryptedOnDisk) && (
             <button
               type="button"
               disabled={signerBusy}

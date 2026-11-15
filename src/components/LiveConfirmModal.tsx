@@ -3,7 +3,7 @@ import { AlertTriangle, ShieldAlert, X, Lock, CheckCircle2 } from 'lucide-react'
 import { useBot } from '../context/BotContext';
 
 export const LiveConfirmModal: React.FC = () => {
-  const { isLiveConfirmOpen, setIsLiveConfirmOpen, confirmLiveMode, config } = useBot();
+  const { isLiveConfirmOpen, setIsLiveConfirmOpen, confirmLiveMode, riskChangedSinceLiveConfirm, config } = useBot();
   const [confirmText, setConfirmText] = useState('');
   const [isSubmitting, setIsSubmitting] = useState(false);
 
@@ -11,6 +11,10 @@ export const LiveConfirmModal: React.FC = () => {
 
   const normalized = confirmText.trim().toUpperCase().replace(/\s+/g, ' ');
   const isMatch = normalized === 'ENABLE LIVE' || normalized === 'LIVE' || normalized === 'ENABLE';
+
+  const sl = Number(config.stop_loss_pct ?? 20);
+  const tp = Number(config.take_profit_pct ?? 35);
+  const maxExposure = Number(config.max_wallet_exposure_sol ?? 0.1);
 
   const handleConfirm = async () => {
     if (!isMatch || isSubmitting) return;
@@ -36,7 +40,7 @@ export const LiveConfirmModal: React.FC = () => {
         <div className="h-[48px] px-4 bg-[var(--red)]/15 border-b border-[var(--red)]/40 flex items-center justify-between">
           <div className="flex items-center gap-2 text-[var(--red)] font-bold tracking-wide">
             <ShieldAlert size={18} />
-            <span>SWITCH TO LIVE ON-CHAIN EXECUTION</span>
+            <span>{riskChangedSinceLiveConfirm ? 'RE-CONFIRM LIVE RISK PARAMETERS' : 'SWITCH TO LIVE ON-CHAIN EXECUTION'}</span>
           </div>
           <button
             type="button"
@@ -53,8 +57,26 @@ export const LiveConfirmModal: React.FC = () => {
             <div className="space-y-1">
               <p className="font-bold">CAUTION: REAL CAPITAL ENGAGEMENT</p>
               <p className="text-[11px] leading-relaxed text-[var(--text)]">
-                You are switching from paper simulation to <strong>LIVE MAINNET EXECUTION</strong>. Real SOL swaps will execute on Solana via Jupiter using your connected Phantom wallet and configured live trading signer.
+                {riskChangedSinceLiveConfirm
+                  ? 'Stop-loss or take-profit was modified since your last confirmation. Review the updated thresholds below before continuing Live execution.'
+                  : 'You are switching from Paper simulation to LIVE MAINNET EXECUTION. Real SOL swaps will execute on Solana via Jupiter.'}
               </p>
+            </div>
+          </div>
+
+          {/* Prominent SL / TP Readout */}
+          <div className="grid grid-cols-3 gap-2">
+            <div className="p-2.5 rounded-lg bg-[var(--panel)] border border-[var(--red)]/40 text-center">
+              <div className="text-[10px] uppercase tracking-wider text-[var(--dim)]">Stop Loss (max 20%)</div>
+              <div className="text-base font-bold font-mono text-[var(--red)] mt-0.5">-{sl}%</div>
+            </div>
+            <div className="p-2.5 rounded-lg bg-[var(--panel)] border border-[var(--green)]/40 text-center">
+              <div className="text-[10px] uppercase tracking-wider text-[var(--dim)]">Take Profit</div>
+              <div className="text-base font-bold font-mono text-[var(--green)] mt-0.5">+{tp}%</div>
+            </div>
+            <div className="p-2.5 rounded-lg bg-[var(--panel)] border border-[var(--border-bright)] text-center">
+              <div className="text-[10px] uppercase tracking-wider text-[var(--dim)]">Max Exposure</div>
+              <div className="text-base font-bold font-mono text-[var(--text)] mt-0.5">{maxExposure} SOL</div>
             </div>
           </div>
 
@@ -62,10 +84,10 @@ export const LiveConfirmModal: React.FC = () => {
             <p className="font-semibold text-[var(--text)]">Mandatory Security Controls Applied:</p>
             <ul className="list-disc list-inside space-y-1 pl-1">
               <li>Bot will be <strong>STOPPED</strong> immediately until you review Live settings and press Start bot.</li>
-              <li>Paper account ledger is isolated from your real Solana wallet.</li>
-              <li>A connected Phantom/Solflare wallet with gas above {config.MIN_GAS_RESERVE_SOL || 0.01} SOL is required before starting Live mode (Phantom asks to confirm swaps in your browser, or you can optionally set an autonomous keypair in Wallets).</li>
+              <li><strong>Server-side trading signer required:</strong> Phantom popup-only wallets cannot automate stop-loss or rug exits and are blocked from starting Live mode.</li>
+              <li>Paper account ledger and Paper CSV rows stay isolated from Live accounting.</li>
               <li>
-                Sniper risk limits active: trade size {config.trade_size_sol || 0.035} SOL (${config.trade_size_usd || 5}), max cap {config.MAX_POSITION_SIZE_SOL || 0.7} SOL (${config.MAX_POSITION_SIZE_USD || 100}), daily loss limit {config.daily_loss_limit_sol || 0.07} SOL (${config.daily_loss_limit_usd || 10}), TP +{config.take_profit_pct || 50}%, SL -{config.stop_loss_pct || 35}%.
+                Active sizing: trade size {config.trade_size_sol || 0.035} SOL (${config.trade_size_usd || 5}), max wallet exposure {maxExposure} SOL, daily loss limit {config.daily_loss_limit_sol || 0.07} SOL (${config.daily_loss_limit_usd || 10}), gas reserve {config.MIN_GAS_RESERVE_SOL || 0.01} SOL.
               </li>
             </ul>
           </div>

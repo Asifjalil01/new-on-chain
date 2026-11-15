@@ -1,9 +1,25 @@
 # Changelog
 
-All notable changes to the **On-Chain SPOT Bot** project will be documented in this file.
+All notable changes to the **Solana Launch Sniper** project are documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+
+---
+
+## [2.4.0] - 2026-11-15
+
+### Fixed
+- **Maturity & Liquidity Gates**: Enforced `min_age_minutes` (default `30`), `max_age_minutes` (default `720`), and `min_liquidity_usd` (default `25000`) across all ages; disabled the `ultra_early_grace_sec` bypass.
+- **Fail-Closed Rug & Holder Screening**: Missing/failed RugCheck reports reject with a short 10s negative cache instead of passing; removed age exemptions on RugCheck scores and danger risks; added on-chain `getTokenLargestAccounts` + `getTokenSupply` holder concentration checks (>10% single non-pool holder or >35% top-10 rejected, fail-closed on RPC error) and pre-buy Jupiter sell-quote route/impact verification (>5% or no route rejected).
+- **Risk/Reward Guardrails**: Capped `stop_loss_pct` at `20%`, enforced `take_profit_pct >= stop_loss_pct * 1.5` (when SL > 0) in `/api/settings` and UI, displayed current SL/TP prominently in the Live confirm modal, and required re-confirmation if SL or TP changes.
+- **Open-Position Exit Isolation**: Snapshotted `take_profit_pct`, `stop_loss_pct`, `trailing_stop_pct`, `rug_exit_drop_pct`, and `max_hold_minutes` onto each position at entry so settings edits apply to new positions only; logged every settings change with old and new values.
+- **Confirmation Timeout & Rebuy Prevention**: Marked timed-out live transactions as `PENDING` instead of failed, polled `getSignatureStatus` up to 120s, persisted `attempted_mints` on submission, checked pre-buy on-chain SPL balance to recover untracked holdings, and reconciled late browser signatures.
+- **External Sell Verification & Multi-RPC**: Required 3 consecutive zero balance reads across 2 distinct RPC endpoints (`SOLANA_RPC_URL` comma-separated) plus confirmed on-chain sell history (`findExternalSellOnChain`) before clearing `sold_externally`; otherwise kept the position open flagged `NEEDS REVIEW` with a manual Clear button.
+- **Conservative Dead-Token Write-Offs**: Restricted `$0` write-offs (`WRITE_OFF_UNSELLABLE`, never counted as wins, marked `estimated: true`) to positions with missing sell routes for `>= 10` minutes across `>= 5` attempts AND liquidity `< $50` from two sources.
+- **Honest Net P&L & Fee/Rent Accounting**: Derived live entry price from actual SOL spent × SOL price at entry; recorded `trade_id`, `sol_spent`, `sol_received`, `base_fee_sol`, `priority_fee_sol`, `rent_paid_sol`, net P&L, and `estimated` flags in JSON and `trades_log.csv` (archiving incompatible legacy CSVs cleanly); preserved Live ledger and Live CSV rows on Paper account reset.
+- **Live Exit Safety & Kill Switch**: Blocked Live Start and `scan_once` without a server-side trading signer (browser popup mode allowed in Paper only); added `max_wallet_exposure_sol` (default `0.1 SOL`); added `POST /api/kill` emergency stop & flatten endpoint and header Kill Switch button.
+- **Security & Secret Hygiene**: Removed plaintext private key persistence (auto-deletes legacy plaintext `.sniper_signer.key` on boot with warning), added optional AES-256-GCM + `scryptSync` passphrase encryption & `/api/trading-signer/unlock`, added `x-api-token` middleware (`API_TOKEN` in `.env` with `0o600`), defaulted server bind to `127.0.0.1`, removed hardcoded fallback SOL prices (`145`/`121.5`) and unused `src/fees/FeeCalculator.ts`.
 
 ---
 

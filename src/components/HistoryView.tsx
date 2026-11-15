@@ -18,6 +18,11 @@ export const HistoryView: React.FC<HistoryViewProps> = ({ trades: propTrades }) 
   const selectedTrade = trades.find((t) => t.id === selectedId) || null;
   const activeMint = selectedTrade?.mint || null;
 
+  const totalBaseFeesSol = trades.reduce((s, t) => s + Number(t.base_fee_sol || 0), 0);
+  const totalPriorityFeesSol = trades.reduce((s, t) => s + Number(t.priority_fee_sol || 0), 0);
+  const totalRentSol = trades.reduce((s, t) => s + Number(t.rent_paid_sol || 0), 0);
+  const totalFeesAndRentSol = totalBaseFeesSol + totalPriorityFeesSol + totalRentSol;
+
   const handleCopyKey = () => {
     if (!activeMint) {
       say('Select a coin in the table first.', 'neutral');
@@ -56,6 +61,28 @@ export const HistoryView: React.FC<HistoryViewProps> = ({ trades: propTrades }) 
 
   return (
     <div className="flex-1 flex flex-col min-h-0 min-w-0 p-4 gap-3 bg-[var(--bg)]">
+      {/* Fees & Rent Summary Strip */}
+      <div className="px-4 py-2 rounded-lg bg-[var(--card)] border border-[var(--border)] flex flex-wrap items-center justify-between gap-4 text-xs font-mono tabular-nums shrink-0">
+        <div className="flex flex-wrap items-center gap-5">
+          <div>
+            <span className="font-sans text-[var(--dim)] mr-1.5">Base fees:</span>
+            <strong className="text-[var(--text)]">{totalBaseFeesSol.toFixed(6)} SOL</strong>
+          </div>
+          <div>
+            <span className="font-sans text-[var(--dim)] mr-1.5">Priority fees:</span>
+            <strong className="text-[var(--text)]">{totalPriorityFeesSol.toFixed(6)} SOL</strong>
+          </div>
+          <div>
+            <span className="font-sans text-[var(--dim)] mr-1.5">Token-account rent:</span>
+            <strong className="text-[var(--text)]">{totalRentSol.toFixed(6)} SOL</strong>
+          </div>
+        </div>
+        <div>
+          <span className="font-sans text-[var(--dim)] mr-1.5">Total fees &amp; rent:</span>
+          <strong className="text-[var(--orange)]">{totalFeesAndRentSol.toFixed(6)} SOL</strong>
+        </div>
+      </div>
+
       {/* Trades Table */}
       <div className="flex-1 min-h-0 bg-[var(--card)] border border-[var(--border)] rounded-lg overflow-hidden flex flex-col">
         {trades.length === 0 ? (
@@ -75,7 +102,8 @@ export const HistoryView: React.FC<HistoryViewProps> = ({ trades: propTrades }) 
                   <th className="py-2.5 px-3">Coin</th>
                   <th className="py-2.5 px-3 text-right">Price</th>
                   <th className="py-2.5 px-3 text-right">Amount (SOL / $)</th>
-                  <th className="py-2.5 px-3 text-right">PnL (SOL / $)</th>
+                  <th className="py-2.5 px-3 text-right">Fees / Rent</th>
+                  <th className="py-2.5 px-3 text-right">Net PnL (SOL / $)</th>
                   <th className="py-2.5 px-3 text-right">PnL %</th>
                   <th className="py-2.5 px-3">Exit reason</th>
                   <th className="py-2.5 px-3">Coin key</th>
@@ -85,12 +113,17 @@ export const HistoryView: React.FC<HistoryViewProps> = ({ trades: propTrades }) 
                 {trades.map((t) => {
                   const isSelected = t.id === selectedId;
                   const isBuy = t.action === 'BUY';
-                  const pnl = t.pnl_usd;
+                  const pnlUsd = t.net_pnl_usd ?? t.pnl_usd;
+                  const pnlSol = t.net_pnl_sol ?? t.pnl_sol;
+                  const rowFeeRentSol =
+                    Number(t.base_fee_sol || 0) +
+                    Number(t.priority_fee_sol || 0) +
+                    Number(t.rent_paid_sol || 0);
                   const toneClass = isBuy
                     ? 'text-[var(--blue)] font-semibold'
-                    : pnl !== null && pnl > 0
+                    : pnlUsd !== null && pnlUsd > 0
                     ? 'text-[var(--green)] font-semibold'
-                    : pnl !== null && pnl < 0
+                    : pnlUsd !== null && pnlUsd < 0
                     ? 'text-[var(--red)] font-semibold'
                     : 'text-[var(--text)]';
 
@@ -109,7 +142,12 @@ export const HistoryView: React.FC<HistoryViewProps> = ({ trades: propTrades }) 
                         {t.action}
                       </td>
                       <td className="py-2 px-3 font-sans font-semibold text-[var(--text)] whitespace-nowrap">
-                        {t.symbol}
+                        <div>{t.symbol}</div>
+                        {t.trade_id && (
+                          <div className="font-mono text-[10px] font-normal text-[var(--dim)]">
+                            #{t.trade_id.slice(0, 8)}
+                          </div>
+                        )}
                       </td>
                       <td className="py-2 px-3 text-right text-[var(--text)] whitespace-nowrap">
                         {fmtPrice(t.price)}
@@ -118,11 +156,22 @@ export const HistoryView: React.FC<HistoryViewProps> = ({ trades: propTrades }) 
                         {t.sol_amount !== undefined ? `${t.sol_amount.toFixed(4)} SOL · ` : ''}
                         <span className="text-[var(--muted)]">{fmtMoney(t.usd)}</span>
                       </td>
+                      <td className="py-2 px-3 text-right text-[var(--muted)] whitespace-nowrap">
+                        {rowFeeRentSol > 0 ? `${rowFeeRentSol.toFixed(5)} SOL` : '—'}
+                      </td>
                       <td className={`py-2 px-3 text-right whitespace-nowrap ${toneClass}`}>
-                        {t.pnl_sol !== undefined && t.pnl_sol !== null
-                          ? `${t.pnl_sol >= 0 ? '+' : ''}${t.pnl_sol.toFixed(4)} SOL · `
+                        {pnlSol !== undefined && pnlSol !== null
+                          ? `${pnlSol >= 0 ? '+' : ''}${pnlSol.toFixed(4)} SOL · `
                           : ''}
-                        {pnl !== null && pnl !== undefined ? fmtMoney(pnl, true) : ''}
+                        {pnlUsd !== null && pnlUsd !== undefined ? fmtMoney(pnlUsd, true) : ''}
+                        {t.estimated && (
+                          <span
+                            title="Estimated valuation (not settled from a confirmed on-chain swap fill)"
+                            className="ml-1.5 px-1 py-0.2 rounded bg-[var(--orange)]/20 text-[var(--orange)] text-[10px] font-bold"
+                          >
+                            est.
+                          </span>
+                        )}
                       </td>
                       <td className={`py-2 px-3 text-right whitespace-nowrap ${toneClass}`}>
                         {t.pnl_pct !== null && t.pnl_pct !== undefined

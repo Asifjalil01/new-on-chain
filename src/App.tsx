@@ -25,21 +25,26 @@ function BotAppContent() {
     selectActiveWallet,
   } = useBot();
 
-  const solPrice = Number(status?.sol_price_usd || portfolio?.sol_price_usd || 145);
-  const cashSol = portfolio.cash_sol ?? (solPrice > 0 ? portfolio.cash / solPrice : 0);
-  const valueSol = portfolio.value_sol ?? (solPrice > 0 ? portfolio.value / solPrice : 0);
-  const openPnlSol = portfolio.open_pnl_sol ?? (solPrice > 0 ? portfolio.open_pnl / solPrice : 0);
-  const dayPnlSol = portfolio.day_pnl_sol ?? (solPrice > 0 ? portfolio.day_pnl / solPrice : 0);
-  const totalPnlSol = portfolio.total_pnl_sol ?? (solPrice > 0 ? portfolio.total_pnl / solPrice : 0);
+  const rawSolPrice = status?.sol_price_usd ?? portfolio?.sol_price_usd ?? null;
+  const solPrice = typeof rawSolPrice === 'number' && rawSolPrice > 0 ? rawSolPrice : null;
+  const cashSol = portfolio.cash_sol ?? (solPrice ? portfolio.cash / solPrice : 0);
+  const valueSol = portfolio.value_sol ?? (solPrice ? portfolio.value / solPrice : 0);
+  const openPnlSol = portfolio.open_pnl_sol ?? (solPrice ? portfolio.open_pnl / solPrice : 0);
+  const dayPnlSol = portfolio.day_pnl_sol ?? (solPrice ? portfolio.day_pnl / solPrice : 0);
+  const totalPnlSol = portfolio.total_pnl_sol ?? (solPrice ? portfolio.total_pnl / solPrice : 0);
   const isLiveMode = config.EXECUTION_MODE === 'live';
 
   const tradeSizeSol =
     config.sizing_basis === 'sol' && Number(config.trade_size_sol) > 0
       ? Number(config.trade_size_sol)
-      : Number(config.trade_size_usd || 5) / solPrice;
+      : solPrice
+      ? Number(config.trade_size_usd || 5) / solPrice
+      : 0;
   const tradeSizeUsd =
     config.sizing_basis === 'sol' && Number(config.trade_size_sol) > 0
-      ? Number(config.trade_size_sol) * solPrice
+      ? solPrice
+        ? Number(config.trade_size_sol) * solPrice
+        : Number(config.trade_size_usd || 5)
       : Number(config.trade_size_usd || 5);
 
   const kpiCards = [
@@ -47,14 +52,14 @@ function BotAppContent() {
       key: 'cash',
       label: isLiveMode ? 'Wallet cash' : 'Cash',
       value: isLiveMode ? fmtSol(cashSol) : fmtMoney(portfolio.cash),
-      sub: isLiveMode ? fmtMoney(portfolio.cash) : fmtSol(cashSol),
+      sub: isLiveMode ? (solPrice ? fmtMoney(portfolio.cash) : 'SOL price unavailable') : solPrice ? fmtSol(cashSol) : 'SOL price unavailable',
       tone: 'neutral' as const,
     },
     {
       key: 'value',
       label: 'Est. total value',
       value: isLiveMode ? fmtSol(valueSol) : fmtMoney(portfolio.value),
-      sub: isLiveMode ? fmtMoney(portfolio.value) : fmtSol(valueSol),
+      sub: isLiveMode ? (solPrice ? fmtMoney(portfolio.value) : 'SOL price unavailable') : solPrice ? fmtSol(valueSol) : 'SOL price unavailable',
       tone: 'neutral' as const,
     },
     {
@@ -82,7 +87,7 @@ function BotAppContent() {
       key: 'winrate',
       label: 'Win rate',
       value: portfolio.winrate || 'no closed trades',
-      sub: `SOL: $${solPrice.toFixed(2)}`,
+      sub: solPrice ? `SOL: $${solPrice.toFixed(2)}` : 'SOL: price unavailable',
       tone: 'neutral' as const,
     },
   ];

@@ -10,6 +10,7 @@
  */
 
 import { VersionedTransaction } from '@solana/web3.js';
+import { apiFetch } from '../utils/api';
 
 export type WalletId = 'phantom' | 'solflare' | 'metamask' | 'trustwallet' | 'coinbase' | 'ledger' | 'paper';
 export type AppExecutionMode = 'paper' | 'testnet' | 'live';
@@ -203,11 +204,11 @@ export class WalletManager {
         chains: ['solana', 'ethereum', 'bsc', 'base', 'arbitrum', 'polygon', 'avalanche', 'optimism'],
         installed: true,
         connected: true, // Default connected for paper spot execution only
-        address: '7xKXtg2CW87d97TXJSDpbD5jBkheTqA83TZRuJosgAsU',
-        nativeBalance: 12.5000,
+        address: 'PaperSimulationAccount',
+        nativeBalance: 0,
         nativeSymbol: 'SOL',
-        balanceUsd: 1600.00,
-        gasReserved: 0.0200,
+        balanceUsd: 0,
+        gasReserved: 0,
         status: 'CONNECTED',
         modeAllowed: ['paper'],
         network: 'Simulation Sandbox',
@@ -357,11 +358,11 @@ export class WalletManager {
 
     // Notify backend
     try {
-      fetch('/api/wallets/disconnect', {
+      apiFetch('/api/wallets/disconnect', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ chain: this.activeChain }),
-      });
+      }).catch(() => {});
     } catch {}
   }
 
@@ -393,6 +394,20 @@ export class WalletManager {
 
   public getMode(): AppExecutionMode {
     return this.currentMode;
+  }
+
+  public syncPaperLedgerBalance(cashUsd: number, solPriceUsd: number | null) {
+    const paper = this.wallets.get('paper');
+    if (!paper) return;
+    const safeUsd = Number.isFinite(cashUsd) ? cashUsd : 0;
+    const safeSol = solPriceUsd && solPriceUsd > 0 ? safeUsd / solPriceUsd : 0;
+    if (Math.abs(paper.balanceUsd - safeUsd) < 0.005 && Math.abs(paper.nativeBalance - safeSol) < 0.00001) {
+      return;
+    }
+    paper.balanceUsd = safeUsd;
+    paper.nativeBalance = safeSol;
+    paper.lastUpdated = Date.now();
+    this.notify();
   }
 
   public subscribe(listener: () => void): () => void {
@@ -503,7 +518,7 @@ export class WalletManager {
           if (rpcData.result?.value !== undefined) {
             const solBal = rpcData.result.value / 1e9;
             wallet.nativeBalance = solBal;
-            wallet.balanceUsd = solBal * 145.0; // Approx valuation
+            wallet.balanceUsd = 0; // USD price unknown without backend SOL price feed
             wallet.lastUpdated = Date.now();
             wallet.rpcEndpoint = 'https://api.mainnet-beta.solana.com';
             wallet.errorReason = undefined;
@@ -527,7 +542,7 @@ export class WalletManager {
     if (!wallet || !wallet.address || wallet.id === 'paper') return false;
 
     try {
-      const res = await fetch('/api/wallets/connect', {
+      const res = await apiFetch('/api/wallets/connect', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -719,7 +734,7 @@ export class WalletManager {
 
     if (!isLive) {
       readiness = 'READY';
-      reason = 'Paper trading simulation active ($1,600 simulated capital).';
+      reason = `Paper trading simulation active ($${active.balanceUsd.toFixed(2)} simulated capital).`;
     } else if (!isConnected) {
       readiness = 'NOT_CONNECTED';
       reason = 'No live wallet connected for ' + chain.toUpperCase() + '.';
